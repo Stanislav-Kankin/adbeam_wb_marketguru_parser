@@ -73,9 +73,9 @@ class App:
         ttk.Checkbutton(options, text="Показывать браузер при обычном inspect", variable=self.headful_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         hint = (
-            "Ручная сессия WB: сначала создай research sample, потом выбери строку. "
-            "Откроется Chromium с отдельным профилем. Если WB покажет защиту, пройди её руками, "
-            "при необходимости обнови страницу и дождись конца таймера. Папка профиля WB и папка артефактов должны быть разными."
+            "Обычный inspect теперь по умолчанию использует папку профиля WB, если она заполнена. "
+            "Это безопаснее для WB, чем каждый раз открывать новый чистый браузер. "
+            "Папка профиля WB и папка артефактов должны быть разными."
         )
         ttk.Label(container, text=hint, wraplength=1120, justify="left").grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
 
@@ -184,14 +184,25 @@ class App:
         sample_path = self._require_sample_path()
         row_number = self._parse_positive_int(self.row_var.get(), field_name="Номер строки")
         artifacts_dir = Path(self.artifacts_dir_var.get())
+        profile_dir = self._optional_profile_dir()
+
+        if profile_dir is not None and artifacts_dir.resolve() == profile_dir.resolve():
+            raise ValueError("Папка артефактов и папка профиля WB должны быть разными")
+
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        if profile_dir is not None:
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            self._append_log(f"Обычный inspect запущен в режиме persistent profile: {profile_dir}\n")
+        else:
+            self._append_log("Обычный inspect запущен во временном браузере без профиля WB\n")
 
         research_row = read_research_row(sample_path, row_number=row_number)
         result = inspect_product_row(
             row_number=row_number,
             research_row=research_row,
             artifacts_dir=artifacts_dir,
-            headful=self.headful_var.get(),
+            headful=self.headful_var.get() or profile_dir is not None,
+            profile_dir=profile_dir,
         )
         self._append_log(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n")
         self.root.after(0, lambda: messagebox.showinfo("Проверка завершена", f"Артефакты сохранены в:\n{artifacts_dir}"))
@@ -201,7 +212,7 @@ class App:
         row_number = self._parse_positive_int(self.row_var.get(), field_name="Номер строки")
         wait_seconds = self._parse_positive_int(self.wait_seconds_var.get(), field_name="Секунды на ручную проверку")
         artifacts_dir = Path(self.artifacts_dir_var.get())
-        profile_dir = Path(self.profile_dir_var.get())
+        profile_dir = self._required_profile_dir()
 
         if artifacts_dir.resolve() == profile_dir.resolve():
             raise ValueError("Папка артефактов и папка профиля WB должны быть разными")
@@ -247,6 +258,18 @@ class App:
         if not sample_path.exists():
             raise FileNotFoundError(f"Не найден sample-файл: {sample_path}")
         return sample_path
+
+    def _required_profile_dir(self) -> Path:
+        profile_dir = self._optional_profile_dir()
+        if profile_dir is None:
+            raise ValueError("Укажи папку профиля WB")
+        return profile_dir
+
+    def _optional_profile_dir(self) -> Path | None:
+        raw = self.profile_dir_var.get().strip()
+        if not raw:
+            return None
+        return Path(raw)
 
     @staticmethod
     def _parse_positive_int(raw_value: str, field_name: str) -> int:

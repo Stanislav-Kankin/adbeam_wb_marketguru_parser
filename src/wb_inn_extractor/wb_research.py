@@ -4,33 +4,60 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import urljoin
 
-from playwright.sync_api import BrowserContext, Page, sync_playwright
+from playwright.sync_api import BrowserContext, Locator, Page, Response, sync_playwright
 
 from .models import InspectResult, ResearchRow
 
 INN_RE = re.compile(r"\b(?:ИНН)\s*[:№]?\s*(\d{10}|\d{12})\b", re.IGNORECASE)
 OGRN_RE = re.compile(r"\b(?:ОГРН)\s*[:№]?\s*(\d{13})\b", re.IGNORECASE)
 OGRNIP_RE = re.compile(r"\b(?:ОГРНИП)\s*[:№]?\s*(\d{15})\b", re.IGNORECASE)
-ENTITY_RE = re.compile(r"\b(ИП|ООО)\b")
+ENTITY_FULL_RE = re.compile(r"(Индивидуальный предприниматель|Общество с ограниченной ответственностью)", re.IGNORECASE)
+ENTITY_SHORT_RE = re.compile(r"\b(ИП|ООО)\b")
 SELLER_NAME_RE = re.compile(
     r"(?:Продавец|Seller|Поставщик)\s*[:]?\s*([A-Za-zА-Яа-яЁё0-9 .,&\-\"'()]{2,120})",
     re.IGNORECASE,
 )
+TOOLTIP_TEXT_RE = re.compile(
+    r"<div class=\"tooltip__content\">(?P<body>.*?)</div>",
+    re.IGNORECASE | re.DOTALL,
+)
+TAG_RE = re.compile(r"<[^>]+>")
+SPACE_RE = re.compile(r"\s+")
 
 ANTI_BOT_PATTERNS = [
     "Подозрительная активность",
     "Что-то не так",
     "Проверяем браузер",
+    "Почти готово",
     "captcha-support@rwb.ru",
     "Новая попытка через",
 ]
 
-SELLER_LINK_SELECTORS = [
-    'a[href^="/seller/"]',
+PRODUCT_SELLER_LINK_SELECTORS = [
+    'a[aria-label="Подробнее о продавце"]',
     'a[href*="/seller/"]',
-    '[aria-label*="продавц" i] a[href*="/seller/"]',
-    'section[aria-label*="продавц" i] a',
+]
+
+SELLER_TOOLTIP_TRIGGER_SELECTORS = [
+    '.seller-details__title-wrap .seller-details__tip-info',
+    '.seller-details__tip-info',
+    '.seller-details__info-wrap .seller-details__tip-info',
+    '.seller-details__parameter-value .seller-details__tip',
+    '.seller-details__parameter-value .tip-question',
+    '.seller-details__info-icon',
+    '.seller-info__info-icon',
+    '.seller-info i',
+    '.seller-rating__ico',
+    '[class*="sellerInfoRatingIcon"]',
+    '[class*="sellerInfoNameDefault"] + div',
+    '[class*="sellerInfo"] [class*="icon"]',
+]
+
+TOOLTIP_VISIBLE_SELECTORS = [
+    ".tooltip.tooltip-supplier",
+    '[class*="tooltip-supplier"]',
 ]
 
 
@@ -57,21 +84,18 @@ def inspect_product_row(
             response = page.goto(research_row.wb_candidate_url, wait_until="domcontentloaded", timeout=60_000)
             _best_effort_wait(page)
 
+            seller_url, seller_response = _go_to_seller_page(page)
+            if seller_response is not None:
+                response = seller_response
+
+            _reveal_supplier_requisites(page)
+
             if manual_wait_seconds > 0:
                 time.sleep(manual_wait_seconds)
-                _best_effort_wait(page)
-
-            seller_url = _extract_seller_url(page)
-            navigated_to_seller_page = False
-            seller_response_status = None
-            if seller_url:
-                seller_response = page.goto(seller_url, wait_until="domcontentloaded", timeout=60_000)
-                _best_effort_wait(page)
-                navigated_to_seller_page = True
-                seller_response_status = seller_response.status if seller_response else None
+                _reveal_supplier_requisites(page)
 
             page.screenshot(path=str(screenshot_path), full_page=True)
-            html = page.content()
+            html = _safe_page_content(page)
             html_path.write_text(html, encoding="utf-8")
             text = _safe_page_text(page)
             text_path.write_text(text, encoding="utf-8")
@@ -80,9 +104,7 @@ def inspect_product_row(
                 row_number=row_number,
                 url=research_row.wb_candidate_url,
                 page=page,
-                seller_url=seller_url,
-                navigated_to_seller_page=navigated_to_seller_page,
-                http_status=seller_response_status if seller_response_status is not None else (response.status if response else None),
+                http_status=response.status if response else None,
                 html=html,
                 text=text,
                 screenshot_path=screenshot_path,
@@ -91,6 +113,8 @@ def inspect_product_row(
                 used_persistent_profile=profile_dir is not None,
                 profile_dir=profile_dir,
                 manual_wait_seconds=manual_wait_seconds,
+                seller_url=seller_url,
+                navigated_to_seller_page=bool(seller_url) or "/seller/" in page.url,
             )
             (artifacts_dir / f"row_{row_number}.json").write_text(
                 json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -122,12 +146,111 @@ def _open_context(playwright, headful: bool, profile_dir: Path | None) -> Browse
     return browser.new_context(viewport={"width": 1600, "height": 1400})
 
 
+def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
+    if "/seller/" in page.url:
+        return page.url, None
+
+    for selector in PRODUCT_SELLER_LINK_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            href = locator.get_attribute("href")
+            target_url = urljoin(page.url, href) if href else None
+            if target_url and "/seller/" in target_url:
+                response = page.goto(target_url, wait_until="domcontentloaded", timeout=30_000)
+                _best_effort_wait(page)
+                return target_url, response
+
+            try:
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=20_000) as nav:
+                    locator.click(timeout=5_000)
+                response = nav.value
+                _best_effort_wait(page)
+                return page.url, response
+            except Exception:
+                continue
+        except Exception:
+            continue
+    return None, None
+
+
+
+
+def _reveal_supplier_requisites(page: Page) -> None:
+    for _ in range(5):
+        _trigger_supplier_tooltip(page)
+        _best_effort_wait(page)
+        text = _safe_page_text(page)
+        if _contains_requisites_text(text):
+            return
+        html = _safe_page_content(page)
+        if _contains_requisites_text(html):
+            return
+        try:
+            page.wait_for_timeout(600)
+        except Exception:
+            break
+
+
+def _trigger_supplier_tooltip(page: Page) -> None:
+    for selector in SELLER_TOOLTIP_TRIGGER_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            locator.scroll_into_view_if_needed(timeout=3_000)
+            try:
+                locator.hover(timeout=3_000, force=True)
+            except Exception:
+                pass
+            try:
+                locator.click(timeout=3_000, force=True)
+            except Exception:
+                pass
+            _dispatch_tooltip_events(page, locator)
+            if _tooltip_visible(page) or _contains_requisites_text(_safe_page_text(page)):
+                return
+        except Exception:
+            continue
+
+
+
+
+def _dispatch_tooltip_events(page: Page, locator: Locator) -> None:
+    try:
+        locator.dispatch_event('mouseenter')
+    except Exception:
+        pass
+    try:
+        locator.dispatch_event('mouseover')
+    except Exception:
+        pass
+    try:
+        locator.dispatch_event('click')
+    except Exception:
+        pass
+    try:
+        page.wait_for_timeout(250)
+    except Exception:
+        return
+
+
+def _tooltip_visible(page: Page) -> bool:
+    for selector in TOOLTIP_VISIBLE_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() and locator.is_visible(timeout=1_000):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _build_result(
     row_number: int,
     url: str,
     page: Page,
-    seller_url: str | None,
-    navigated_to_seller_page: bool,
     http_status: int | None,
     html: str,
     text: str,
@@ -137,24 +260,26 @@ def _build_result(
     used_persistent_profile: bool,
     profile_dir: Path | None,
     manual_wait_seconds: int,
+    seller_url: str | None,
+    navigated_to_seller_page: bool,
 ) -> InspectResult:
     page_title = _safe_page_title(page)
-    combined_text = "\n".join(filter(None, [page_title or "", text, html[:50_000]]))
+    tooltip_text = _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html)
+    combined_text = "\n".join(filter(None, [page_title or "", text, tooltip_text, html[:100_000]]))
     anti_bot_detected = _contains_anti_bot_text(combined_text, http_status)
     inn = _first_match(INN_RE, combined_text)
     ogrn = _first_match(OGRN_RE, combined_text)
     ogrnip = _first_match(OGRNIP_RE, combined_text)
-    entity_type = _first_match(ENTITY_RE, combined_text)
-    seller_display_name = _extract_seller_display_name(page=page, text=combined_text)
+    entity_type = _extract_entity_type(combined_text)
+    seller_display_name = _extract_seller_display_name(tooltip_text or combined_text)
 
     parse_status, note = _detect_parse_status(
         http_status=http_status,
         anti_bot_detected=anti_bot_detected,
         inn=inn,
         entity_type=entity_type,
-        navigated_to_seller_page=navigated_to_seller_page,
-        seller_url=seller_url,
         manual_wait_seconds=manual_wait_seconds,
+        navigated_to_seller_page=navigated_to_seller_page,
     )
 
     return InspectResult(
@@ -162,8 +287,6 @@ def _build_result(
         url=url,
         page_title=page_title,
         final_url=page.url,
-        seller_url=seller_url,
-        navigated_to_seller_page=navigated_to_seller_page,
         http_status=http_status,
         parse_status=parse_status,
         content_text_length=len(text),
@@ -171,6 +294,8 @@ def _build_result(
         used_persistent_profile=used_persistent_profile,
         profile_dir=str(profile_dir) if profile_dir else None,
         manual_wait_seconds=manual_wait_seconds,
+        seller_url=seller_url,
+        navigated_to_seller_page=navigated_to_seller_page,
         inn=inn,
         ogrn=ogrn,
         ogrnip=ogrnip,
@@ -188,9 +313,8 @@ def _detect_parse_status(
     anti_bot_detected: bool,
     inn: str | None,
     entity_type: str | None,
-    navigated_to_seller_page: bool,
-    seller_url: str | None,
     manual_wait_seconds: int,
+    navigated_to_seller_page: bool,
 ) -> tuple[str, str]:
     requisites_found = bool(inn or entity_type)
 
@@ -200,7 +324,7 @@ def _detect_parse_status(
     if anti_bot_detected:
         if manual_wait_seconds > 0:
             return "MANUAL_CHECK_REQUIRED", "WB показал антибот-страницу даже после ручной паузы"
-        return "ANTI_BOT_PAGE", "WB показал антибот-страницу вместо карточки товара/продавца"
+        return "ANTI_BOT_PAGE", "WB показал антибот-страницу вместо карточки товара"
 
     if http_status and http_status >= 400 and requisites_found:
         return "PARTIAL_SUCCESS", f"HTTP status {http_status}, но часть реквизитов найдена"
@@ -209,22 +333,24 @@ def _detect_parse_status(
         return "PAGE_NOT_AVAILABLE", f"HTTP status {http_status}"
 
     if inn:
-        return "SUCCESS", "ИНН найден в тексте страницы продавца" if navigated_to_seller_page else "ИНН найден в тексте страницы"
+        return "SUCCESS", "ИНН найден на странице продавца" if navigated_to_seller_page else "ИНН найден в тексте страницы"
 
     if entity_type:
         return "NEEDS_REVIEW", "Есть признаки реквизитов продавца, но ИНН не найден"
 
-    if seller_url and not navigated_to_seller_page:
-        return "SELLER_PAGE_NAVIGATION_FAILED", "Нашли ссылку продавца, но не перешли на страницу продавца"
+    if navigated_to_seller_page:
+        return "SELLER_PAGE_OPENED", "Перешли на страницу продавца, но реквизиты не извлеклись"
 
     if manual_wait_seconds > 0:
-        return "PRODUCT_PAGE_OPENED", "Страница открылась после ручной сессии, но реквизиты пока не извлечены"
+        return "PRODUCT_PAGE_OPENED", "Карточка открылась после ручной сессии, но реквизиты пока не извлечены"
 
-    return "SELLER_PAGE_OPENED_NO_REQUISITES" if navigated_to_seller_page else "PAGE_OPENED_NO_REQUISITES", (
-        "Перешли на страницу продавца, но реквизиты не найдены"
-        if navigated_to_seller_page
-        else "Страница открылась, но реквизиты продавца не найдены"
-    )
+    return "PAGE_OPENED_NO_REQUISITES", "Страница открылась, но реквизиты продавца не найдены"
+
+
+
+
+def _contains_requisites_text(text: str) -> bool:
+    return any(marker in text for marker in ('ИНН', 'ОГРН', 'ОГРНИП', 'Номер регистрации', 'КПП'))
 
 
 def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
@@ -234,10 +360,54 @@ def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
     return any(pattern.lower() in text_lower for pattern in ANTI_BOT_PATTERNS)
 
 
-def _extract_seller_display_name(page: Page, text: str) -> str | None:
-    link_text = _extract_seller_link_text(page)
-    if link_text:
-        return link_text
+def _extract_tooltip_text_from_page(page: Page) -> str | None:
+    for selector in TOOLTIP_VISIBLE_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            text = locator.inner_text(timeout=2_000)
+            normalized = _normalize_text(text)
+            if normalized:
+                return normalized
+        except Exception:
+            continue
+    return None
+
+
+def _extract_tooltip_text_from_html(html: str) -> str | None:
+    for match in TOOLTIP_TEXT_RE.finditer(html):
+        raw_body = match.group("body")
+        if "ИНН" not in raw_body and "ОГРН" not in raw_body and "ОГРНИП" not in raw_body:
+            continue
+        text = TAG_RE.sub(" ", raw_body)
+        text = text.replace("&nbsp;", " ")
+        normalized = _normalize_text(text)
+        if normalized:
+            return normalized
+    return None
+
+
+def _extract_entity_type(text: str) -> str | None:
+    full = _first_match(ENTITY_FULL_RE, text)
+    if full:
+        if full.lower().startswith("индивидуальный"):
+            return "ИП"
+        if full.lower().startswith("общество"):
+            return "ООО"
+    return _first_match(ENTITY_SHORT_RE, text)
+
+
+def _extract_seller_display_name(text: str) -> str | None:
+    if not text:
+        return None
+
+    normalized_text = _normalize_text(text)
+    first_line = normalized_text.splitlines()[0] if normalized_text else ""
+    if first_line and not any(marker in first_line for marker in ["ИНН", "ОГРН", "ОГРНИП", "Номер регистрации", "Интернет-магазин Wildberries"]):
+        cleaned = re.sub(r"\b(ИП|ООО)\b\s*$", "", first_line).strip(" ,")
+        if len(cleaned) >= 2:
+            return cleaned[:120]
 
     match = SELLER_NAME_RE.search(text)
     if not match:
@@ -246,47 +416,46 @@ def _extract_seller_display_name(page: Page, text: str) -> str | None:
     return value[:120] if value else None
 
 
-def _extract_seller_url(page: Page) -> str | None:
-    for selector in SELLER_LINK_SELECTORS:
-        try:
-            locator = page.locator(selector).first
-            if locator.count() == 0:
-                continue
-            href = locator.get_attribute("href", timeout=5000)
-            if not href:
-                continue
-            return page.url.rstrip("/") + href if href.startswith("?") else page.url.split('/catalog/')[0] + href if href.startswith('/') else href
-        except Exception:
-            continue
-    return None
-
-
-def _extract_seller_link_text(page: Page) -> str | None:
-    for selector in SELLER_LINK_SELECTORS:
-        try:
-            locator = page.locator(selector).first
-            if locator.count() == 0:
-                continue
-            text = " ".join(locator.inner_text(timeout=5000).split())
-            if text:
-                return text[:120]
-        except Exception:
-            continue
-    return None
-
-
 def _best_effort_wait(page: Page) -> None:
-    try:
-        page.wait_for_load_state("networkidle", timeout=15_000)
-    except Exception:
-        pass
+    for state in ("domcontentloaded", "load", "networkidle"):
+        try:
+            page.wait_for_load_state(state, timeout=10_000)
+        except Exception:
+            continue
+    for _ in range(3):
+        try:
+            page.wait_for_timeout(700)
+        except Exception:
+            break
+
+
+def _safe_page_content(page: Page) -> str:
+    last_error: Exception | None = None
+    for _ in range(8):
+        try:
+            _best_effort_wait(page)
+            return page.content()
+        except Exception as exc:
+            last_error = exc
+            try:
+                page.wait_for_timeout(800)
+            except Exception:
+                break
+    if last_error is not None:
+        return f"<!-- page.content failed: {last_error} -->"
+    return ""
 
 
 def _safe_page_text(page: Page) -> str:
-    try:
-        return page.locator("body").inner_text(timeout=10_000)
-    except Exception:
-        return ""
+    for _ in range(6):
+        try:
+            return page.locator("body").inner_text(timeout=10_000)
+        except Exception:
+            try:
+                page.wait_for_timeout(700)
+            except Exception:
+                break
+    return ""
 
 
 def _safe_page_title(page: Page) -> str | None:
@@ -299,3 +468,12 @@ def _safe_page_title(page: Page) -> str | None:
 def _first_match(pattern: re.Pattern[str], text: str) -> str | None:
     match = pattern.search(text)
     return match.group(1) if match else None
+
+
+def _normalize_text(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        cleaned = SPACE_RE.sub(" ", line).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return "\n".join(lines)

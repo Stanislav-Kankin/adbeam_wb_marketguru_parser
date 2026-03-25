@@ -37,8 +37,6 @@ class InspectResult(BaseModel):
     url: str
     page_title: str | None = None
     final_url: str | None = None
-    seller_url: str | None = None
-    navigated_to_seller_page: bool = False
     http_status: int | None = None
     parse_status: str = "UNKNOWN"
     content_text_length: int = 0
@@ -46,6 +44,8 @@ class InspectResult(BaseModel):
     used_persistent_profile: bool = False
     profile_dir: str | None = None
     manual_wait_seconds: int = 0
+    seller_url: str | None = None
+    navigated_to_seller_page: bool = False
     inn: str | None = None
     ogrn: str | None = None
     ogrnip: str | None = None
