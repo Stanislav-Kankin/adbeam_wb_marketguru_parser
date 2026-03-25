@@ -62,18 +62,27 @@ def build_wb_candidate_url(nm_id: int | None) -> str | None:
     return f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx"
 
 
-def extract_research_rows(input_path: Path, limit: int) -> list[ResearchRow]:
+def extract_research_rows(input_path: Path, limit: int | None = None) -> list[ResearchRow]:
     sheet = load_active_sheet(input_path)
     headers = [str(value).strip() if value is not None else "" for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
     header_index = {header: idx for idx, header in enumerate(headers)}
 
     result: list[ResearchRow] = []
+    seen_pairs: set[tuple[str, str]] = set()
     for excel_row_index, row in enumerate(sheet.iter_rows(min_row=2, max_row=sheet.max_row, values_only=True), start=2):
         nm_id_raw = row[header_index[REQUIRED_HEADERS["article"]]] if REQUIRED_HEADERS["article"] in header_index else None
         try:
             nm_id = int(nm_id_raw) if nm_id_raw not in (None, "", "—") else None
         except (TypeError, ValueError):
             nm_id = None
+
+        brand = _normalize_key_part(_get_cell(row, header_index, REQUIRED_HEADERS["brand"]))
+        seller = _normalize_key_part(_get_cell(row, header_index, REQUIRED_HEADERS["seller"]))
+        unique_key = (brand, seller)
+        if brand or seller:
+            if unique_key in seen_pairs:
+                continue
+            seen_pairs.add(unique_key)
 
         research_row = ResearchRow(
             source_sheet=sheet.title,
@@ -87,7 +96,7 @@ def extract_research_rows(input_path: Path, limit: int) -> list[ResearchRow]:
             parse_note=None if nm_id else "В строке нет корректного Артикул/nmID",
         )
         result.append(research_row)
-        if len(result) >= limit:
+        if limit is not None and len(result) >= limit:
             break
     return result
 
@@ -133,6 +142,12 @@ def read_research_row(input_path: Path, row_number: int) -> ResearchRow:
     data = dict(zip(headers, target[0], strict=False))
     return ResearchRow(**data)
 
+
+
+def _normalize_key_part(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().casefold()
 
 def _get_cell(row: tuple[Any, ...], header_index: dict[str, int], header_name: str) -> Any:
     index = header_index.get(header_name)

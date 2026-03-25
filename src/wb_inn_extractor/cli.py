@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample_parser = subparsers.add_parser("sample", help="Подготовить research-выборку")
     sample_parser.add_argument("--input", required=True, type=Path)
     sample_parser.add_argument("--output", type=Path, default=Path("output/research_sample.xlsx"))
-    sample_parser.add_argument("--limit", type=int, default=30)
+    sample_parser.add_argument("--limit", type=int, default=None)
 
     inspect_parser = subparsers.add_parser("inspect-row", help="Открыть одну строку через Playwright и сохранить артефакты")
     inspect_parser.add_argument("--input", required=True, type=Path)
@@ -66,7 +66,7 @@ def main() -> None:
         rows = extract_research_rows(args.input, limit=args.limit)
         save_research_sample(args.output, rows)
         print(f"Создан файл: {args.output}")
-        print(f"Строк: {len(rows)}")
+        print(f"Строк (уникальных по продавцу+бренду): {len(rows)}")
         return
 
     if args.command == "inspect-row":

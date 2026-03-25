@@ -31,7 +31,7 @@ class App:
         self.sample_output_var = tk.StringVar(value=str(Path("output/research_sample.xlsx")))
         self.artifacts_dir_var = tk.StringVar(value=str(Path("output/artifacts")))
         self.profile_dir_var = tk.StringVar(value=str(Path("output/wb_profile")))
-        self.limit_var = tk.StringVar(value="30")
+        self.limit_var = tk.StringVar(value="")
         self.row_var = tk.StringVar(value="2")
         self.batch_count_var = tk.StringVar(value="5")
         self.batch_output_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
@@ -211,12 +211,15 @@ class App:
     def _action_sample(self) -> None:
         input_path = self._require_input_path()
         output_path = Path(self.sample_output_var.get())
-        limit = self._parse_positive_int(self.limit_var.get(), field_name="Лимит строк")
+        raw_limit = self.limit_var.get().strip()
+        limit = self._parse_positive_int(raw_limit, field_name="Лимит строк") if raw_limit else None
         output_path.parent.mkdir(parents=True, exist_ok=True)
         rows = extract_research_rows(input_path, limit=limit)
         save_research_sample(output_path, rows)
         self._append_log(f"Создан файл: {output_path}\n")
-        self._append_log(f"Строк: {len(rows)}\n")
+        if limit is None:
+            self._append_log("Лимит строк не задан: в sample сохранены все уникальные продавцы по паре бренд+продавец\n")
+        self._append_log(f"Строк (уникальных по продавцу+бренду): {len(rows)}\n")
 
     def _action_inspect(self) -> None:
         sample_path = self._require_sample_path()
