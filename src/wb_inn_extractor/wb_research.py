@@ -88,11 +88,14 @@ def inspect_product_row(
             if seller_response is not None:
                 response = seller_response
 
-            _reveal_supplier_requisites(page)
+            captured_tooltip_text = _reveal_supplier_requisites(page)
 
             if manual_wait_seconds > 0:
                 time.sleep(manual_wait_seconds)
-                _reveal_supplier_requisites(page)
+                captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites(page)
+
+            html_before_screenshot = _safe_page_content(page)
+            captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html_before_screenshot)
 
             page.screenshot(path=str(screenshot_path), full_page=True)
             html = _safe_page_content(page)
@@ -107,6 +110,7 @@ def inspect_product_row(
                 http_status=response.status if response else None,
                 html=html,
                 text=text,
+                captured_tooltip_text=captured_tooltip_text,
                 screenshot_path=screenshot_path,
                 html_path=html_path,
                 text_path=text_path,
@@ -177,20 +181,25 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
 
 
 
-def _reveal_supplier_requisites(page: Page) -> None:
-    for _ in range(5):
+def _reveal_supplier_requisites(page: Page) -> str | None:
+    captured_tooltip_text: str | None = None
+    for _ in range(6):
         _trigger_supplier_tooltip(page)
         _best_effort_wait(page)
+        captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page)
+        if _contains_requisites_text(captured_tooltip_text or ""):
+            return captured_tooltip_text
         text = _safe_page_text(page)
         if _contains_requisites_text(text):
-            return
+            return captured_tooltip_text or text
         html = _safe_page_content(page)
         if _contains_requisites_text(html):
-            return
+            return captured_tooltip_text or _extract_tooltip_text_from_html(html) or html
         try:
             page.wait_for_timeout(600)
         except Exception:
             break
+    return captured_tooltip_text
 
 
 def _trigger_supplier_tooltip(page: Page) -> None:
@@ -200,10 +209,7 @@ def _trigger_supplier_tooltip(page: Page) -> None:
             if locator.count() == 0:
                 continue
             locator.scroll_into_view_if_needed(timeout=3_000)
-            try:
-                locator.hover(timeout=3_000, force=True)
-            except Exception:
-                pass
+            _hover_like_human(page, locator)
             try:
                 locator.click(timeout=3_000, force=True)
             except Exception:
@@ -215,6 +221,24 @@ def _trigger_supplier_tooltip(page: Page) -> None:
             continue
 
 
+
+def _hover_like_human(page: Page, locator: Locator) -> None:
+    try:
+        box = locator.bounding_box()
+        if box:
+            x = box["x"] + box["width"] / 2
+            y = box["y"] + box["height"] / 2
+            page.mouse.move(x - 8, y - 6)
+            page.wait_for_timeout(120)
+            page.mouse.move(x, y, steps=8)
+            page.wait_for_timeout(250)
+    except Exception:
+        pass
+    try:
+        locator.hover(timeout=3_000, force=True)
+        page.wait_for_timeout(350)
+    except Exception:
+        pass
 
 
 def _dispatch_tooltip_events(page: Page, locator: Locator) -> None:
@@ -254,6 +278,7 @@ def _build_result(
     http_status: int | None,
     html: str,
     text: str,
+    captured_tooltip_text: str | None,
     screenshot_path: Path,
     html_path: Path,
     text_path: Path,
@@ -264,7 +289,7 @@ def _build_result(
     navigated_to_seller_page: bool,
 ) -> InspectResult:
     page_title = _safe_page_title(page)
-    tooltip_text = _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html)
+    tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html)
     combined_text = "\n".join(filter(None, [page_title or "", text, tooltip_text, html[:100_000]]))
     anti_bot_detected = _contains_anti_bot_text(combined_text, http_status)
     inn = _first_match(INN_RE, combined_text)
@@ -368,10 +393,17 @@ def _extract_tooltip_text_from_page(page: Page) -> str | None:
                 continue
             text = locator.inner_text(timeout=2_000)
             normalized = _normalize_text(text)
-            if normalized:
+            if normalized and _contains_requisites_text(normalized):
                 return normalized
         except Exception:
             continue
+    try:
+        text = page.locator('.tooltip__content').last.inner_text(timeout=1_500)
+        normalized = _normalize_text(text)
+        if normalized and _contains_requisites_text(normalized):
+            return normalized
+    except Exception:
+        pass
     return None
 
 
@@ -403,9 +435,12 @@ def _extract_seller_display_name(text: str) -> str | None:
         return None
 
     normalized_text = _normalize_text(text)
-    first_line = normalized_text.splitlines()[0] if normalized_text else ""
-    if first_line and not any(marker in first_line for marker in ["ИНН", "ОГРН", "ОГРНИП", "Номер регистрации", "Интернет-магазин Wildberries"]):
-        cleaned = re.sub(r"\b(ИП|ООО)\b\s*$", "", first_line).strip(" ,")
+    for line in normalized_text.splitlines():
+        if not line:
+            continue
+        if any(marker in line for marker in ["ИНН", "ОГРН", "ОГРНИП", "КПП", "Номер регистрации", "Интернет-магазин Wildberries"]):
+            continue
+        cleaned = re.sub(r"\b(ИП|ООО)\b\s*$", "", line).strip(" ,")
         if len(cleaned) >= 2:
             return cleaned[:120]
 
