@@ -35,7 +35,6 @@ class App:
         self.row_var = tk.StringVar(value="2")
         self.batch_count_var = tk.StringVar(value="5")
         self.batch_output_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
-        self.wait_seconds_var = tk.StringVar(value="90")
         self.headful_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Готово")
 
@@ -81,12 +80,9 @@ class App:
 
         ttk.Label(options, text="Итоговый Excel batch").grid(row=6, column=0, sticky="w", pady=4)
         ttk.Entry(options, textvariable=self.batch_output_var).grid(row=6, column=1, sticky="ew", padx=(8, 8), pady=4)
-        ttk.Button(options, text="Выбрать", command=self._choose_sample_output).grid(row=6, column=2, sticky="ew", pady=4)
+        ttk.Button(options, text="Выбрать", command=self._choose_batch_output).grid(row=6, column=2, sticky="ew", pady=4)
 
-        ttk.Label(options, text="Секунд на ручную проверку").grid(row=7, column=0, sticky="w", pady=4)
-        ttk.Entry(options, textvariable=self.wait_seconds_var, width=12).grid(row=7, column=1, sticky="w", padx=(8, 8), pady=4)
-
-        ttk.Checkbutton(options, text="Показывать браузер при обычном inspect", variable=self.headful_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(options, text="Показывать браузер при обычном inspect", variable=self.headful_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         hint = (
             "Обычный inspect теперь по умолчанию использует папку профиля WB, если она заполнена. "
@@ -97,21 +93,21 @@ class App:
 
         actions = ttk.Frame(container)
         actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-        for idx in range(5):
+        for idx in range(4):
             actions.columnconfigure(idx, weight=1)
 
         ttk.Button(actions, text="1. Проанализировать Excel", command=lambda: self._run_in_thread(self._action_analyze)).grid(row=0, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(actions, text="2. Создать research sample", command=lambda: self._run_in_thread(self._action_sample)).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(actions, text="3. Проверить строку", command=lambda: self._run_in_thread(self._action_inspect)).grid(row=0, column=2, sticky="ew", padx=4)
-        ttk.Button(actions, text="4. Пакетный прогон", command=lambda: self._run_in_thread(self._action_batch)).grid(row=0, column=3, sticky="ew", padx=4)
-        ttk.Button(actions, text="5. Ручная сессия WB", command=lambda: self._run_in_thread(self._action_manual_session)).grid(row=0, column=4, sticky="ew", padx=(8, 0))
+        ttk.Button(actions, text="4. Пакетный прогон", command=lambda: self._run_in_thread(self._action_batch)).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         tools = ttk.Frame(container)
         tools.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-        for idx in range(2):
+        for idx in range(3):
             tools.columnconfigure(idx, weight=1)
         ttk.Button(tools, text="Открыть папку артефактов", command=self._open_artifacts_dir).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(tools, text="Открыть папку профиля WB", command=self._open_profile_dir).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Button(tools, text="Открыть папку профиля WB", command=self._open_profile_dir).grid(row=0, column=1, sticky="ew", padx=8)
+        ttk.Button(tools, text="Открыть результаты", command=self._open_batch_results).grid(row=0, column=2, sticky="ew", padx=(8, 0))
 
         log_frame = ttk.LabelFrame(container, text="Лог / результат", padding=8)
         log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
@@ -153,11 +149,36 @@ class App:
         if path:
             self.profile_dir_var.set(path)
 
+
+    def _choose_batch_output(self) -> None:
+        current = Path(self.batch_output_var.get()) if self.batch_output_var.get().strip() else Path("output/batch_results.xlsx")
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить итоговый Excel batch",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=current.name,
+            initialdir=str(current.parent),
+        )
+        if path:
+            self.batch_output_var.set(path)
+
     def _open_artifacts_dir(self) -> None:
         self._open_dir(Path(self.artifacts_dir_var.get()))
 
     def _open_profile_dir(self) -> None:
         self._open_dir(Path(self.profile_dir_var.get()))
+
+    def _open_batch_results(self) -> None:
+        path = Path(self.batch_output_var.get().strip() or "output/batch_results.xlsx")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                os.startfile(str(path))  # type: ignore[attr-defined]
+                return
+            except AttributeError:
+                subprocess.Popen(["xdg-open", str(path)])
+                return
+        self._open_dir(path.parent)
 
     def _open_dir(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
@@ -279,43 +300,6 @@ class App:
 
         save_batch_results(batch_output, output_rows)
         self.root.after(0, lambda: messagebox.showinfo("Batch завершён", f"Итоговый Excel сохранён:{batch_output}"))
-
-    def _action_manual_session(self) -> None:
-        sample_path = self._require_sample_path()
-        row_number = self._parse_positive_int(self.row_var.get(), field_name="Номер строки")
-        wait_seconds = self._parse_positive_int(self.wait_seconds_var.get(), field_name="Секунды на ручную проверку")
-        artifacts_dir = Path(self.artifacts_dir_var.get())
-        profile_dir = self._required_profile_dir()
-
-        if artifacts_dir.resolve() == profile_dir.resolve():
-            raise ValueError("Папка артефактов и папка профиля WB должны быть разными")
-
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        profile_dir.mkdir(parents=True, exist_ok=True)
-
-        self._append_log(
-            "Ручная сессия WB началась. Что делать:\n"
-            "1) если открылась защита WB — пройди её руками;\n"
-            "2) если страница пустая — попробуй обновить;\n"
-            "3) дождись конца таймера, потом смотри JSON и screenshot.\n"
-        )
-        research_row = read_research_row(sample_path, row_number=row_number)
-        result = inspect_product_row(
-            row_number=row_number,
-            research_row=research_row,
-            artifacts_dir=artifacts_dir,
-            headful=True,
-            profile_dir=profile_dir,
-            manual_wait_seconds=wait_seconds,
-        )
-        self._append_log(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n")
-        self.root.after(
-            0,
-            lambda: messagebox.showinfo(
-                "Ручная сессия завершена",
-                f"Профиль: {profile_dir}\nАртефакты: {artifacts_dir}",
-            ),
-        )
 
     def _require_input_path(self) -> Path:
         input_value = self.input_path_var.get().strip()
