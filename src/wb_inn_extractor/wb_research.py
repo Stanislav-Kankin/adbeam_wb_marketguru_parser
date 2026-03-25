@@ -139,7 +139,7 @@ def inspect_product_row(
         context = _open_context(playwright=playwright, headful=headful, profile_dir=profile_dir)
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            response = page.goto(research_row.wb_candidate_url, wait_until="domcontentloaded", timeout=7_500)
+            response = page.goto(research_row.wb_candidate_url, wait_until="domcontentloaded", timeout=10_000)
             _best_effort_wait(page)
 
             seller_url, seller_response = _go_to_seller_page(page)
@@ -220,13 +220,13 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
             href = locator.get_attribute("href")
             target_url = urljoin(page.url, href) if href else None
             if target_url and "/seller/" in target_url:
-                response = page.goto(target_url, wait_until="domcontentloaded", timeout=7_500)
+                response = page.goto(target_url, wait_until="domcontentloaded", timeout=10_000)
                 _best_effort_wait(page)
                 return target_url, response
 
             try:
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=2_500) as nav:
-                    locator.click(timeout=2_500)
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=8_000) as nav:
+                    locator.click(timeout=3_000)
                 response = nav.value
                 _best_effort_wait(page)
                 return page.url, response
@@ -263,7 +263,7 @@ def _reveal_supplier_requisites(page: Page) -> str | None:
             return text
 
         try:
-            page.wait_for_timeout(175)
+            page.wait_for_timeout(350)
         except Exception:
             break
     return captured_tooltip_text
@@ -275,10 +275,10 @@ def _trigger_supplier_tooltip(page: Page) -> None:
             locator = page.locator(selector).first
             if locator.count() == 0:
                 continue
-            locator.scroll_into_view_if_needed(timeout=375)
+            locator.scroll_into_view_if_needed(timeout=1_500)
             _hover_like_human(page, locator)
             try:
-                locator.click(timeout=375, force=True)
+                locator.click(timeout=1_500, force=True)
             except Exception:
                 pass
             _dispatch_tooltip_events(page, locator)
@@ -315,14 +315,14 @@ def _hover_like_human(page: Page, locator: Locator) -> None:
             x = box["x"] + box["width"] / 2
             y = box["y"] + box["height"] / 2
             page.mouse.move(x - 8, y - 6)
-            page.wait_for_timeout(30)
-            page.mouse.move(x, y, steps=6)
             page.wait_for_timeout(60)
+            page.mouse.move(x, y, steps=6)
+            page.wait_for_timeout(120)
     except Exception:
         pass
     try:
-        locator.hover(timeout=375, force=True)
-        page.wait_for_timeout(90)
+        locator.hover(timeout=1_500, force=True)
+        page.wait_for_timeout(180)
     except Exception:
         pass
 
@@ -341,7 +341,7 @@ def _dispatch_tooltip_events(page: Page, locator: Locator) -> None:
     except Exception:
         pass
     try:
-        page.wait_for_timeout(60)
+        page.wait_for_timeout(120)
     except Exception:
         return
 
@@ -350,7 +350,7 @@ def _tooltip_visible(page: Page) -> bool:
     for selector in TOOLTIP_VISIBLE_SELECTORS:
         try:
             locator = page.locator(selector).first
-            if locator.count() and locator.is_visible(timeout=250):
+            if locator.count() and locator.is_visible(timeout=500):
                 return True
         except Exception:
             continue
@@ -527,14 +527,14 @@ def _extract_tooltip_text_from_page(page: Page) -> str | None:
             locator = page.locator(selector).first
             if locator.count() == 0:
                 continue
-            text = locator.inner_text(timeout=500)
+            text = locator.inner_text(timeout=1_000)
             normalized = _normalize_text(text)
             if normalized and _contains_requisites_text(normalized):
                 return normalized
         except Exception:
             continue
     try:
-        text = page.locator('.tooltip__content').last.inner_text(timeout=375)
+        text = page.locator('.tooltip__content').last.inner_text(timeout=750)
         normalized = _normalize_text(text)
         if normalized and _contains_requisites_text(normalized):
             return normalized
@@ -607,12 +607,12 @@ def _extract_seller_display_name(text: str) -> str | None:
 def _best_effort_wait(page: Page) -> None:
     for state in ("domcontentloaded", "load", "networkidle"):
         try:
-            page.wait_for_load_state(state, timeout=2_500)
+            page.wait_for_load_state(state, timeout=5_000)
         except Exception:
             continue
     for _ in range(3):
         try:
-            page.wait_for_timeout(175)
+            page.wait_for_timeout(350)
         except Exception:
             break
 
@@ -626,7 +626,7 @@ def _safe_page_content(page: Page) -> str:
         except Exception as exc:
             last_error = exc
             try:
-                page.wait_for_timeout(200)
+                page.wait_for_timeout(400)
             except Exception:
                 break
     if last_error is not None:
@@ -637,10 +637,10 @@ def _safe_page_content(page: Page) -> str:
 def _safe_page_text(page: Page) -> str:
     for _ in range(6):
         try:
-            return page.locator("body").inner_text(timeout=2_500)
+            return page.locator("body").inner_text(timeout=5_000)
         except Exception:
             try:
-                page.wait_for_timeout(175)
+                page.wait_for_timeout(350)
             except Exception:
                 break
     return ""
