@@ -26,6 +26,13 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--artifacts-dir", type=Path, default=Path("output/artifacts"))
     inspect_parser.add_argument("--headful", action="store_true")
 
+    manual_parser = subparsers.add_parser("manual-session", help="Открыть строку в persistent profile режиме и дать время на ручную проверку")
+    manual_parser.add_argument("--input", required=True, type=Path)
+    manual_parser.add_argument("--row", required=True, type=int)
+    manual_parser.add_argument("--artifacts-dir", type=Path, default=Path("output/artifacts"))
+    manual_parser.add_argument("--profile-dir", type=Path, default=Path("output/wb_profile"))
+    manual_parser.add_argument("--wait-seconds", type=int, default=90)
+
     return parser
 
 
@@ -54,6 +61,24 @@ def main() -> None:
             research_row=research_row,
             artifacts_dir=args.artifacts_dir,
             headful=args.headful,
+        )
+        print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "manual-session":
+        if args.artifacts_dir.resolve() == args.profile_dir.resolve():
+            raise ValueError("Папка артефактов и папка профиля WB должны быть разными")
+
+        args.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        args.profile_dir.mkdir(parents=True, exist_ok=True)
+        research_row = read_research_row(args.input, row_number=args.row)
+        result = inspect_product_row(
+            row_number=args.row,
+            research_row=research_row,
+            artifacts_dir=args.artifacts_dir,
+            headful=True,
+            profile_dir=args.profile_dir,
+            manual_wait_seconds=args.wait_seconds,
         )
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
         return

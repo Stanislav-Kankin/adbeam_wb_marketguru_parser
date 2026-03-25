@@ -37,11 +37,19 @@ class InspectResult(BaseModel):
     url: str
     page_title: str | None = None
     final_url: str | None = None
-    content_text_length: int
+    http_status: int | None = None
+    parse_status: str = "UNKNOWN"
+    content_text_length: int = 0
+    anti_bot_detected: bool = False
+    used_persistent_profile: bool = False
+    profile_dir: str | None = None
+    manual_wait_seconds: int = 0
     inn: str | None = None
     ogrn: str | None = None
     ogrnip: str | None = None
     entity_type: str | None = None
+    seller_display_name: str | None = None
     note: str | None = None
     screenshot_path: str | None = None
     html_path: str | None = None
+    text_path: str | None = None
