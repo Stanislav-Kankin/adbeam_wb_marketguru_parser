@@ -26,6 +26,13 @@ ANTI_BOT_PATTERNS = [
     "Новая попытка через",
 ]
 
+SELLER_LINK_SELECTORS = [
+    'a[href^="/seller/"]',
+    'a[href*="/seller/"]',
+    '[aria-label*="продавц" i] a[href*="/seller/"]',
+    'section[aria-label*="продавц" i] a',
+]
+
 
 def inspect_product_row(
     row_number: int,
@@ -54,6 +61,15 @@ def inspect_product_row(
                 time.sleep(manual_wait_seconds)
                 _best_effort_wait(page)
 
+            seller_url = _extract_seller_url(page)
+            navigated_to_seller_page = False
+            seller_response_status = None
+            if seller_url:
+                seller_response = page.goto(seller_url, wait_until="domcontentloaded", timeout=60_000)
+                _best_effort_wait(page)
+                navigated_to_seller_page = True
+                seller_response_status = seller_response.status if seller_response else None
+
             page.screenshot(path=str(screenshot_path), full_page=True)
             html = page.content()
             html_path.write_text(html, encoding="utf-8")
@@ -64,7 +80,9 @@ def inspect_product_row(
                 row_number=row_number,
                 url=research_row.wb_candidate_url,
                 page=page,
-                http_status=response.status if response else None,
+                seller_url=seller_url,
+                navigated_to_seller_page=navigated_to_seller_page,
+                http_status=seller_response_status if seller_response_status is not None else (response.status if response else None),
                 html=html,
                 text=text,
                 screenshot_path=screenshot_path,
@@ -108,6 +126,8 @@ def _build_result(
     row_number: int,
     url: str,
     page: Page,
+    seller_url: str | None,
+    navigated_to_seller_page: bool,
     http_status: int | None,
     html: str,
     text: str,
@@ -125,13 +145,15 @@ def _build_result(
     ogrn = _first_match(OGRN_RE, combined_text)
     ogrnip = _first_match(OGRNIP_RE, combined_text)
     entity_type = _first_match(ENTITY_RE, combined_text)
-    seller_display_name = _extract_seller_display_name(combined_text)
+    seller_display_name = _extract_seller_display_name(page=page, text=combined_text)
 
     parse_status, note = _detect_parse_status(
         http_status=http_status,
         anti_bot_detected=anti_bot_detected,
         inn=inn,
         entity_type=entity_type,
+        navigated_to_seller_page=navigated_to_seller_page,
+        seller_url=seller_url,
         manual_wait_seconds=manual_wait_seconds,
     )
 
@@ -140,6 +162,8 @@ def _build_result(
         url=url,
         page_title=page_title,
         final_url=page.url,
+        seller_url=seller_url,
+        navigated_to_seller_page=navigated_to_seller_page,
         http_status=http_status,
         parse_status=parse_status,
         content_text_length=len(text),
@@ -164,6 +188,8 @@ def _detect_parse_status(
     anti_bot_detected: bool,
     inn: str | None,
     entity_type: str | None,
+    navigated_to_seller_page: bool,
+    seller_url: str | None,
     manual_wait_seconds: int,
 ) -> tuple[str, str]:
     requisites_found = bool(inn or entity_type)
@@ -174,7 +200,7 @@ def _detect_parse_status(
     if anti_bot_detected:
         if manual_wait_seconds > 0:
             return "MANUAL_CHECK_REQUIRED", "WB показал антибот-страницу даже после ручной паузы"
-        return "ANTI_BOT_PAGE", "WB показал антибот-страницу вместо карточки товара"
+        return "ANTI_BOT_PAGE", "WB показал антибот-страницу вместо карточки товара/продавца"
 
     if http_status and http_status >= 400 and requisites_found:
         return "PARTIAL_SUCCESS", f"HTTP status {http_status}, но часть реквизитов найдена"
@@ -183,15 +209,22 @@ def _detect_parse_status(
         return "PAGE_NOT_AVAILABLE", f"HTTP status {http_status}"
 
     if inn:
-        return "SUCCESS", "ИНН найден в тексте страницы"
+        return "SUCCESS", "ИНН найден в тексте страницы продавца" if navigated_to_seller_page else "ИНН найден в тексте страницы"
 
     if entity_type:
         return "NEEDS_REVIEW", "Есть признаки реквизитов продавца, но ИНН не найден"
 
-    if manual_wait_seconds > 0:
-        return "PRODUCT_PAGE_OPENED", "Карточка открылась после ручной сессии, но реквизиты пока не извлечены"
+    if seller_url and not navigated_to_seller_page:
+        return "SELLER_PAGE_NAVIGATION_FAILED", "Нашли ссылку продавца, но не перешли на страницу продавца"
 
-    return "PAGE_OPENED_NO_REQUISITES", "Страница открылась, но реквизиты продавца не найдены"
+    if manual_wait_seconds > 0:
+        return "PRODUCT_PAGE_OPENED", "Страница открылась после ручной сессии, но реквизиты пока не извлечены"
+
+    return "SELLER_PAGE_OPENED_NO_REQUISITES" if navigated_to_seller_page else "PAGE_OPENED_NO_REQUISITES", (
+        "Перешли на страницу продавца, но реквизиты не найдены"
+        if navigated_to_seller_page
+        else "Страница открылась, но реквизиты продавца не найдены"
+    )
 
 
 def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
@@ -201,12 +234,45 @@ def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
     return any(pattern.lower() in text_lower for pattern in ANTI_BOT_PATTERNS)
 
 
-def _extract_seller_display_name(text: str) -> str | None:
+def _extract_seller_display_name(page: Page, text: str) -> str | None:
+    link_text = _extract_seller_link_text(page)
+    if link_text:
+        return link_text
+
     match = SELLER_NAME_RE.search(text)
     if not match:
         return None
     value = " ".join(match.group(1).split())
     return value[:120] if value else None
+
+
+def _extract_seller_url(page: Page) -> str | None:
+    for selector in SELLER_LINK_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            href = locator.get_attribute("href", timeout=5000)
+            if not href:
+                continue
+            return page.url.rstrip("/") + href if href.startswith("?") else page.url.split('/catalog/')[0] + href if href.startswith('/') else href
+        except Exception:
+            continue
+    return None
+
+
+def _extract_seller_link_text(page: Page) -> str | None:
+    for selector in SELLER_LINK_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            text = " ".join(locator.inner_text(timeout=5000).split())
+            if text:
+                return text[:120]
+        except Exception:
+            continue
+    return None
 
 
 def _best_effort_wait(page: Page) -> None:

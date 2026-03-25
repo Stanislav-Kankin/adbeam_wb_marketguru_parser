@@ -37,6 +37,8 @@ class InspectResult(BaseModel):
     url: str
     page_title: str | None = None
     final_url: str | None = None
+    seller_url: str | None = None
+    navigated_to_seller_page: bool = False
     http_status: int | None = None
     parse_status: str = "UNKNOWN"
     content_text_length: int = 0
