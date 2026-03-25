@@ -69,6 +69,56 @@ TOOLTIP_VISIBLE_SELECTORS = [
 ]
 
 
+def _extract_requisites_text_via_dom(page: Page) -> str | None:
+    try:
+        text = page.evaluate(
+            """
+            () => {
+              const markers = ['ИНН', 'ОГРН', 'ОГРНИП', 'Номер регистрации', 'КПП'];
+              const selectors = [
+                '.tooltip.tooltip-supplier',
+                '[class*="tooltip-supplier"]',
+                '.tooltip__content',
+                '.seller-details',
+                'body',
+              ];
+
+              const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+              const candidates = [];
+
+              for (const selector of selectors) {
+                const nodes = Array.from(document.querySelectorAll(selector));
+                for (const node of nodes.reverse()) {
+                  const raw = normalize(node.innerText || node.textContent || '');
+                  if (raw && markers.some((marker) => raw.includes(marker))) {
+                    candidates.push(raw);
+                  }
+                }
+              }
+
+              const allNodes = Array.from(document.querySelectorAll('body *'));
+              for (const node of allNodes.reverse()) {
+                const raw = normalize(node.innerText || node.textContent || '');
+                if (!raw || raw.length < 15) {
+                  continue;
+                }
+                if (markers.some((marker) => raw.includes(marker))) {
+                  candidates.push(raw);
+                  break;
+                }
+              }
+
+              return candidates[0] || null;
+            }
+            """
+        )
+    except Exception:
+        return None
+
+    normalized = _normalize_text(text or "")
+    return normalized or None
+
+
 def inspect_product_row(
     row_number: int,
     research_row: ResearchRow,
@@ -191,20 +241,29 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
 
 def _reveal_supplier_requisites(page: Page) -> str | None:
     captured_tooltip_text: str | None = None
-    for _ in range(6):
+    for _ in range(8):
         _trigger_supplier_tooltip(page)
         _best_effort_wait(page)
+
+        dom_text = _extract_requisites_text_via_dom(page)
+        if _contains_requisites_text(dom_text or ""):
+            return dom_text
+
         captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page)
         if _contains_requisites_text(captured_tooltip_text or ""):
             return captured_tooltip_text
+
+        html = _safe_page_content(page)
+        html_tooltip = _extract_tooltip_text_from_html(html)
+        if _contains_requisites_text(html_tooltip or ""):
+            return html_tooltip
+
         text = _safe_page_text(page)
         if _contains_requisites_text(text):
-            return captured_tooltip_text or text
-        html = _safe_page_content(page)
-        if _contains_requisites_text(html):
-            return captured_tooltip_text or _extract_tooltip_text_from_html(html) or html
+            return text
+
         try:
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(700)
         except Exception:
             break
     return captured_tooltip_text
@@ -223,11 +282,30 @@ def _trigger_supplier_tooltip(page: Page) -> None:
             except Exception:
                 pass
             _dispatch_tooltip_events(page, locator)
-            if _tooltip_visible(page) or _contains_requisites_text(_safe_page_text(page)):
+            _force_tooltip_open_via_js(page, selector)
+            if _tooltip_visible(page) or _contains_requisites_text(_extract_requisites_text_via_dom(page) or ""):
                 return
         except Exception:
             continue
 
+
+def _force_tooltip_open_via_js(page: Page, selector: str) -> None:
+    try:
+        page.evaluate(
+            """
+            (selector) => {
+              const node = document.querySelector(selector);
+              if (!node) return;
+              const events = ['mouseenter', 'mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'];
+              for (const eventName of events) {
+                node.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, composed: true, view: window }));
+              }
+            }
+            """,
+            selector,
+        )
+    except Exception:
+        return
 
 
 def _hover_like_human(page: Page, locator: Locator) -> None:
@@ -440,6 +518,10 @@ def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
 
 
 def _extract_tooltip_text_from_page(page: Page) -> str | None:
+    dom_text = _extract_requisites_text_via_dom(page)
+    if _contains_requisites_text(dom_text or ""):
+        return dom_text
+
     for selector in TOOLTIP_VISIBLE_SELECTORS:
         try:
             locator = page.locator(selector).first
