@@ -139,3 +139,55 @@ def _get_cell(row: tuple[Any, ...], header_index: dict[str, int], header_name: s
     if index is None:
         return None
     return row[index]
+
+
+
+def read_research_rows_range(input_path: Path, start_row: int = 2, limit: int = 10) -> list[ResearchRow]:
+    workbook = load_workbook(input_path, read_only=True, data_only=True)
+    sheet = workbook[workbook.sheetnames[0]]
+    headers = [str(value).strip() if value is not None else "" for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
+
+    result: list[ResearchRow] = []
+    max_row = min(sheet.max_row, start_row + limit - 1)
+    for row_number in range(start_row, max_row + 1):
+        target = list(sheet.iter_rows(min_row=row_number, max_row=row_number, values_only=True))
+        if not target:
+            continue
+        data = dict(zip(headers, target[0], strict=False))
+        result.append(ResearchRow(**data))
+    return result
+
+
+
+def save_batch_results(output_path: Path, rows: list[dict[str, Any]]) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "batch_results"
+    headers = [
+        "row_number",
+        "source_row_index",
+        "product_name",
+        "wb_nm_id",
+        "brand",
+        "seller_name_raw",
+        "wb_candidate_url",
+        "final_url",
+        "seller_url",
+        "navigated_to_seller_page",
+        "seller_display_name",
+        "entity_type",
+        "inn",
+        "ogrn",
+        "ogrnip",
+        "parse_status",
+        "parse_note",
+        "http_status",
+        "used_persistent_profile",
+        "screenshot_path",
+        "html_path",
+        "text_path",
+    ]
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([row.get(header) for header in headers])
+    workbook.save(output_path)

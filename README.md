@@ -182,3 +182,19 @@ esearch_sample.xlsx" --row 2 --profile-dir "C:\path\wb_profile" --artifacts-dir 
 - Парсинг реквизитов теперь идёт по полному HTML seller page, без обрезания `html[:100_000]`.
 - Приоритет источников: DOM tooltip -> полный HTML -> общий текст страницы.
 - Обычный inspect с заполненной папкой профиля WB продолжает использовать persistent profile.
+
+
+## Batch режим
+
+CLI:
+
+```powershell
+python -m wb_inn_extractor.cli batch-run --input ".\output\research_sample.xlsx" --start-row 2 --limit 5 --output ".\output\batch_results.xlsx" --artifacts-dir ".\output\batch_artifacts" --profile-dir ".\output\wb_profile"
+```
+
+GUI:
+- укажи `research_sample.xlsx`
+- выбери стартовую строку, например `2`
+- укажи сколько строк обработать, например `5`
+- нажми `4. Пакетный прогон`
+- на выходе получишь новый Excel с результатами сразу по нескольким продавцам
