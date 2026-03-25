@@ -177,10 +177,8 @@ esearch_sample.xlsx" --row 2 --profile-dir "C:\path\wb_profile" --artifacts-dir 
 - переход на seller page теперь в первую очередь делается через прямой `href` на `/seller/...`, без лишнего клика по карточке.
 
 
-## Step 11
+## Step 12 fix
 
-Точный фикс под seller page:
-
-- реквизиты теперь парсятся сначала из живого tooltip, потом из полного HTML финальной seller page, а не из усечённого `html[:100_000]`;
-- это важно, потому что `tooltip-supplier` на WB часто находится далеко внизу HTML и раньше просто не попадал в поиск;
-- имя продавца теперь тоже пытаемся брать из tooltip/HTML seller page, а не из title сайта Wildberries.
+- Парсинг реквизитов теперь идёт по полному HTML seller page, без обрезания `html[:100_000]`.
+- Приоритет источников: DOM tooltip -> полный HTML -> общий текст страницы.
+- Обычный inspect с заполненной папкой профиля WB продолжает использовать persistent profile.

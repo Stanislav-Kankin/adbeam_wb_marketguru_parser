@@ -19,16 +19,8 @@ SELLER_NAME_RE = re.compile(
     r"(?:Продавец|Seller|Поставщик)\s*[:]?\s*([A-Za-zА-Яа-яЁё0-9 .,&\-\"'()]{2,120})",
     re.IGNORECASE,
 )
-TOOLTIP_BLOCK_RE = re.compile(
-    r"<div[^>]*class=\"[^\"]*tooltip-supplier[^\"]*\"[^>]*>(?P<body>.*?)</div>",
-    re.IGNORECASE | re.DOTALL,
-)
-SELLER_HEADER_RE = re.compile(
-    r"<h1[^>]*>(?P<name>.*?)</h1>",
-    re.IGNORECASE | re.DOTALL,
-)
 TOOLTIP_TEXT_RE = re.compile(
-    r"<div[^>]*class=\"[^\"]*tooltip__content[^\"]*\"[^>]*>(?P<body>.*?)</div>",
+    r"<div class=\"tooltip__content\">(?P<body>.*?)</div>",
     re.IGNORECASE | re.DOTALL,
 )
 TAG_RE = re.compile(r"<[^>]+>")
@@ -191,20 +183,31 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
 
 def _reveal_supplier_requisites(page: Page) -> str | None:
     captured_tooltip_text: str | None = None
-    for _ in range(6):
+    for _ in range(8):
         _trigger_supplier_tooltip(page)
         _best_effort_wait(page)
+
         captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page)
         if _contains_requisites_text(captured_tooltip_text or ""):
             return captured_tooltip_text
+
+        dom_text = _extract_requisites_text_via_dom(page)
+        if _contains_requisites_text(dom_text or ""):
+            return dom_text
+
         text = _safe_page_text(page)
         if _contains_requisites_text(text):
             return captured_tooltip_text or text
+
         html = _safe_page_content(page)
+        html_tooltip = _extract_tooltip_text_from_html(html)
+        if _contains_requisites_text(html_tooltip or ""):
+            return html_tooltip
         if _contains_requisites_text(html):
-            return captured_tooltip_text or _extract_tooltip_text_from_html(html) or html
+            return html_tooltip or html
+
         try:
-            page.wait_for_timeout(600)
+            page.wait_for_timeout(700)
         except Exception:
             break
     return captured_tooltip_text
@@ -298,37 +301,13 @@ def _build_result(
 ) -> InspectResult:
     page_title = _safe_page_title(page)
     tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html)
-
-    inn = _first_non_empty(
-        _first_match(INN_RE, tooltip_text or ""),
-        _first_match(INN_RE, html),
-        _first_match(INN_RE, text),
-        _first_match(INN_RE, page_title or ""),
-    )
-    ogrn = _first_non_empty(
-        _first_match(OGRN_RE, tooltip_text or ""),
-        _first_match(OGRN_RE, html),
-        _first_match(OGRN_RE, text),
-    )
-    ogrnip = _first_non_empty(
-        _first_match(OGRNIP_RE, tooltip_text or ""),
-        _first_match(OGRNIP_RE, html),
-        _first_match(OGRNIP_RE, text),
-    )
-
-    entity_type = _first_non_empty(
-        _extract_entity_type(tooltip_text or ""),
-        _extract_entity_type(html),
-        _extract_entity_type(text),
-    )
-    seller_display_name = _first_non_empty(
-        _extract_seller_display_name_from_html(html),
-        _extract_seller_display_name(tooltip_text or ""),
-        _extract_seller_display_name(text),
-    )
-
-    combined_text = "\n".join(filter(None, [page_title or "", text, tooltip_text or "", inn or "", ogrn or "", ogrnip or "", entity_type or "", seller_display_name or ""]))
-    anti_bot_detected = _contains_anti_bot_text(combined_text + "\n" + html[:5000], http_status)
+    combined_text = "\n".join(filter(None, [page_title or "", text, tooltip_text, html]))
+    anti_bot_detected = _contains_anti_bot_text(combined_text, http_status)
+    inn = _first_match(INN_RE, combined_text)
+    ogrn = _first_match(OGRN_RE, combined_text)
+    ogrnip = _first_match(OGRNIP_RE, combined_text)
+    entity_type = _extract_entity_type(combined_text)
+    seller_display_name = _extract_seller_display_name("\n".join(filter(None, [tooltip_text, text, html])))
 
     parse_status, note = _detect_parse_status(
         http_status=http_status,
@@ -363,28 +342,6 @@ def _build_result(
         html_path=str(html_path),
         text_path=str(text_path),
     )
-
-
-def _first_non_empty(*values: str | None) -> str | None:
-    for value in values:
-        if value:
-            return value
-    return None
-
-
-def _extract_seller_display_name_from_html(html: str) -> str | None:
-    tooltip_text = _extract_tooltip_text_from_html(html)
-    if tooltip_text:
-        name = _extract_seller_display_name(tooltip_text)
-        if name:
-            return name
-
-    for match in SELLER_HEADER_RE.finditer(html):
-        raw = TAG_RE.sub(' ', match.group('name'))
-        normalized = _normalize_text(raw)
-        if normalized and 'Wildberries' not in normalized:
-            return normalized[:120]
-    return None
 
 
 def _detect_parse_status(
@@ -439,7 +396,46 @@ def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
     return any(pattern.lower() in text_lower for pattern in ANTI_BOT_PATTERNS)
 
 
+def _extract_requisites_text_via_dom(page: Page) -> str | None:
+    try:
+        text = page.evaluate(
+            """
+            () => {
+              const selectors = [
+                '.tooltip.tooltip-supplier .tooltip__content',
+                '[class*=\"tooltip-supplier\"] .tooltip__content',
+                '.tooltip__content',
+              ];
+              for (const selector of selectors) {
+                const nodes = Array.from(document.querySelectorAll(selector));
+                for (const node of nodes.reverse()) {
+                  const text = (node.innerText || node.textContent || '').trim();
+                  if (
+                    text.includes('ИНН') ||
+                    text.includes('ОГРН') ||
+                    text.includes('ОГРНИП') ||
+                    text.includes('Номер регистрации')
+                  ) {
+                    return text;
+                  }
+                }
+              }
+              return null;
+            }
+            """
+        )
+    except Exception:
+        return None
+
+    normalized = _normalize_text(text or "")
+    return normalized or None
+
+
 def _extract_tooltip_text_from_page(page: Page) -> str | None:
+    js_text = _extract_requisites_text_via_dom(page)
+    if _contains_requisites_text(js_text or ""):
+        return js_text
+
     for selector in TOOLTIP_VISIBLE_SELECTORS:
         try:
             locator = page.locator(selector).first
@@ -462,32 +458,48 @@ def _extract_tooltip_text_from_page(page: Page) -> str | None:
 
 
 def _extract_tooltip_text_from_html(html: str) -> str | None:
-    block_candidates: list[str] = []
+    if not html:
+        return None
 
-    for match in TOOLTIP_BLOCK_RE.finditer(html):
-        block_candidates.append(match.group('body'))
+    marker_positions = []
+    for marker in ("ИНН", "ОГРН", "ОГРНИП", "Номер регистрации", "КПП"):
+        start = 0
+        while True:
+            idx = html.find(marker, start)
+            if idx == -1:
+                break
+            marker_positions.append(idx)
+            start = idx + len(marker)
+
+    for idx in marker_positions:
+        chunk_start = max(0, idx - 1200)
+        chunk_end = min(len(html), idx + 2200)
+        chunk = html[chunk_start:chunk_end]
+        text = TAG_RE.sub(" ", chunk)
+        text = text.replace("&nbsp;", " ")
+        normalized = _normalize_text(text)
+        if _contains_requisites_text(normalized):
+            return normalized
+
+    for css_marker in ("tooltip-supplier", "tooltip__content"):
+        idx = html.find(css_marker)
+        if idx != -1:
+            chunk = html[max(0, idx - 400):min(len(html), idx + 4000)]
+            text = TAG_RE.sub(" ", chunk)
+            text = text.replace("&nbsp;", " ")
+            normalized = _normalize_text(text)
+            if _contains_requisites_text(normalized):
+                return normalized
+
     for match in TOOLTIP_TEXT_RE.finditer(html):
-        block_candidates.append(match.group('body'))
-
-    for raw_body in block_candidates:
-        if not _contains_requisites_text(raw_body):
+        raw_body = match.group("body")
+        if "ИНН" not in raw_body and "ОГРН" not in raw_body and "ОГРНИП" not in raw_body:
             continue
-        text = TAG_RE.sub(' ', raw_body)
-        text = text.replace('&nbsp;', ' ')
+        text = TAG_RE.sub(" ", raw_body)
+        text = text.replace("&nbsp;", " ")
         normalized = _normalize_text(text)
         if normalized:
             return normalized
-
-    if _contains_requisites_text(html):
-        index_candidates = [idx for marker in ('ИНН', 'ОГРН', 'ОГРНИП', 'КПП', 'Номер регистрации') if (idx := html.find(marker)) != -1]
-        if index_candidates:
-            start_idx = max(0, min(index_candidates) - 800)
-            end_idx = min(len(html), max(index_candidates) + 1200)
-            snippet = html[start_idx:end_idx]
-            text = TAG_RE.sub(' ', snippet).replace('&nbsp;', ' ')
-            normalized = _normalize_text(text)
-            if normalized:
-                return normalized
     return None
 
 
