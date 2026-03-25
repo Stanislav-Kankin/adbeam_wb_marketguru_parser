@@ -1,0 +1,14 @@
+{
+  "row_number": 2,
+  "url": "https://www.wildberries.ru/catalog/115764247/detail.aspx",
+  "page_title": "Почти готово...",
+  "final_url": "https://www.wildberries.ru/catalog/115764247/detail.aspx",
+  "content_text_length": 17,
+  "inn": null,
+  "ogrn": null,
+  "ogrnip": null,
+  "entity_type": null,
+  "note": "Regex-поиск выполнен по тексту страницы без гарантии открытия seller tooltip",
+  "screenshot_path": "output\\artifacts\\row_2.png",
+  "html_path": "output\\artifacts\\row_2.html"
+}
