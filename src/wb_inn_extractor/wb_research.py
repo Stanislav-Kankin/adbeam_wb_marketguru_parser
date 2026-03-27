@@ -139,7 +139,7 @@ def inspect_product_row(
         context = _open_context(playwright=playwright, headful=headful, profile_dir=profile_dir)
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            response = page.goto(research_row.wb_candidate_url, wait_until="domcontentloaded", timeout=2_500)
+            response = page.goto(research_row.wb_candidate_url, wait_until="domcontentloaded", timeout=4_500)
             _best_effort_wait(page)
 
             seller_url, seller_response = _go_to_seller_page(page)
@@ -220,12 +220,12 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
             href = locator.get_attribute("href")
             target_url = urljoin(page.url, href) if href else None
             if target_url and "/seller/" in target_url:
-                response = page.goto(target_url, wait_until="domcontentloaded", timeout=2_500)
+                response = page.goto(target_url, wait_until="domcontentloaded", timeout=4_500)
                 _best_effort_wait(page)
                 return target_url, response
 
             try:
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=4_000) as nav:
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=7_000) as nav:
                     locator.click(timeout=375)
                 response = nav.value
                 _best_effort_wait(page)
@@ -350,7 +350,7 @@ def _tooltip_visible(page: Page) -> bool:
     for selector in TOOLTIP_VISIBLE_SELECTORS:
         try:
             locator = page.locator(selector).first
-            if locator.count() and locator.is_visible(timeout=250):
+            if locator.count() and locator.is_visible(timeout=500):
                 return True
         except Exception:
             continue
@@ -527,7 +527,7 @@ def _extract_tooltip_text_from_page(page: Page) -> str | None:
             locator = page.locator(selector).first
             if locator.count() == 0:
                 continue
-            text = locator.inner_text(timeout=250)
+            text = locator.inner_text(timeout=500)
             normalized = _normalize_text(text)
             if normalized and _contains_requisites_text(normalized):
                 return normalized
@@ -607,7 +607,7 @@ def _extract_seller_display_name(text: str) -> str | None:
 def _best_effort_wait(page: Page) -> None:
     for state in ("domcontentloaded", "load", "networkidle"):
         try:
-            page.wait_for_load_state(state, timeout=2_500)
+            page.wait_for_load_state(state, timeout=4_500)
         except Exception:
             continue
     for _ in range(3):
@@ -626,7 +626,7 @@ def _safe_page_content(page: Page) -> str:
         except Exception as exc:
             last_error = exc
             try:
-                page.wait_for_timeout(200)
+                page.wait_for_timeout(500)
             except Exception:
                 break
     if last_error is not None:
@@ -637,7 +637,7 @@ def _safe_page_content(page: Page) -> str:
 def _safe_page_text(page: Page) -> str:
     for _ in range(6):
         try:
-            return page.locator("body").inner_text(timeout=2_500)
+            return page.locator("body").inner_text(timeout=4_500)
         except Exception:
             try:
                 page.wait_for_timeout(90)
