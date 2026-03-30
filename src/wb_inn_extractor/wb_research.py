@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import BrowserContext, Locator, Page, Response, sync_playwright
 
@@ -119,6 +119,146 @@ def _extract_requisites_text_via_dom(page: Page) -> str | None:
     return normalized or None
 
 
+
+
+class BatchInspector:
+    def __init__(self, artifacts_dir: Path, headful: bool = True, profile_dir: Path | None = None):
+        self.artifacts_dir = artifacts_dir
+        self.headful = headful
+        self.profile_dir = profile_dir
+        self._playwright = None
+        self._context: BrowserContext | None = None
+        self._page: Page | None = None
+
+    def __enter__(self) -> "BatchInspector":
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self._playwright = sync_playwright().start()
+        self._context = _open_context(playwright=self._playwright, headful=self.headful, profile_dir=self.profile_dir)
+        self._page = _fresh_batch_page(self._context)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._context is not None:
+            self._context.close()
+        if self._playwright is not None:
+            self._playwright.stop()
+
+    def inspect_row(self, row_number: int, research_row: ResearchRow) -> InspectResult:
+        if self._context is None:
+            raise RuntimeError('BatchInspector is not started')
+        if self._page is None or self._page.is_closed() or _is_unexpected_page_url(self._page.url):
+            self._page = _fresh_batch_page(self._context)
+
+        result = _inspect_product_row_on_page(
+            page=self._page,
+            row_number=row_number,
+            research_row=research_row,
+            artifacts_dir=self.artifacts_dir,
+            profile_dir=self.profile_dir,
+            manual_wait_seconds=0,
+        )
+
+        if _is_unexpected_page_url(result.final_url):
+            self._page = _fresh_batch_page(self._context)
+            result = _inspect_product_row_on_page(
+                page=self._page,
+                row_number=row_number,
+                research_row=research_row,
+                artifacts_dir=self.artifacts_dir,
+                profile_dir=self.profile_dir,
+                manual_wait_seconds=0,
+            )
+
+        if _is_unexpected_page_url(self._page.url):
+            self._page = _fresh_batch_page(self._context)
+        return result
+
+
+def _is_unexpected_page_url(url: str | None) -> bool:
+    if not url or url == 'about:blank':
+        return False
+    try:
+        host = (urlparse(url).netloc or '').lower()
+    except Exception:
+        return False
+    return bool(host) and 'wildberries.ru' not in host
+
+
+def _fresh_batch_page(context: BrowserContext) -> Page:
+    for page in list(context.pages):
+        try:
+            page.close()
+        except Exception:
+            pass
+    page = context.new_page()
+    try:
+        page.goto('about:blank', wait_until='domcontentloaded', timeout=1_500)
+    except Exception:
+        pass
+    return page
+
+
+def _inspect_product_row_on_page(
+    page: Page,
+    row_number: int,
+    research_row: ResearchRow,
+    artifacts_dir: Path,
+    profile_dir: Path | None = None,
+    manual_wait_seconds: int = 0,
+) -> InspectResult:
+    if not research_row.wb_candidate_url:
+        raise ValueError('У строки нет wb_candidate_url')
+
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = artifacts_dir / f"row_{row_number}.png"
+    html_path = artifacts_dir / f"row_{row_number}.html"
+    text_path = artifacts_dir / f"row_{row_number}_text.txt"
+
+    response = page.goto(research_row.wb_candidate_url, wait_until='domcontentloaded', timeout=4_500)
+    _best_effort_wait(page)
+
+    seller_url, seller_response = _go_to_seller_page(page)
+    if seller_response is not None:
+        response = seller_response
+
+    captured_tooltip_text = _reveal_supplier_requisites(page)
+
+    if manual_wait_seconds > 0:
+        time.sleep(manual_wait_seconds)
+        captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites(page)
+
+    html_before_screenshot = _safe_page_content(page)
+    captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html_before_screenshot)
+
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    html = _safe_page_content(page)
+    html_path.write_text(html, encoding='utf-8')
+    text = _safe_page_text(page)
+    text_path.write_text(text, encoding='utf-8')
+
+    result = _build_result(
+        row_number=row_number,
+        url=research_row.wb_candidate_url,
+        page=page,
+        http_status=response.status if response else None,
+        html=html,
+        text=text,
+        captured_tooltip_text=captured_tooltip_text,
+        screenshot_path=screenshot_path,
+        html_path=html_path,
+        text_path=text_path,
+        used_persistent_profile=profile_dir is not None,
+        profile_dir=profile_dir,
+        manual_wait_seconds=manual_wait_seconds,
+        seller_url=seller_url,
+        navigated_to_seller_page=bool(seller_url) or '/seller/' in page.url,
+    )
+    (artifacts_dir / f"row_{row_number}.json").write_text(
+        json.dumps(result.model_dump(mode='json'), ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+    return result
+
 def inspect_product_row(
     row_number: int,
     research_row: ResearchRow,
@@ -127,62 +267,18 @@ def inspect_product_row(
     profile_dir: Path | None = None,
     manual_wait_seconds: int = 0,
 ) -> InspectResult:
-    if not research_row.wb_candidate_url:
-        raise ValueError("У строки нет wb_candidate_url")
-
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    screenshot_path = artifacts_dir / f"row_{row_number}.png"
-    html_path = artifacts_dir / f"row_{row_number}.html"
-    text_path = artifacts_dir / f"row_{row_number}_text.txt"
-
     with sync_playwright() as playwright:
         context = _open_context(playwright=playwright, headful=headful, profile_dir=profile_dir)
         try:
-            page = context.pages[0] if context.pages else context.new_page()
-            response = page.goto(research_row.wb_candidate_url, wait_until="domcontentloaded", timeout=4_500)
-            _best_effort_wait(page)
-
-            seller_url, seller_response = _go_to_seller_page(page)
-            if seller_response is not None:
-                response = seller_response
-
-            captured_tooltip_text = _reveal_supplier_requisites(page)
-
-            if manual_wait_seconds > 0:
-                time.sleep(manual_wait_seconds)
-                captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites(page)
-
-            html_before_screenshot = _safe_page_content(page)
-            captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html_before_screenshot)
-
-            page.screenshot(path=str(screenshot_path), full_page=True)
-            html = _safe_page_content(page)
-            html_path.write_text(html, encoding="utf-8")
-            text = _safe_page_text(page)
-            text_path.write_text(text, encoding="utf-8")
-
-            result = _build_result(
-                row_number=row_number,
-                url=research_row.wb_candidate_url,
+            page = _fresh_batch_page(context)
+            return _inspect_product_row_on_page(
                 page=page,
-                http_status=response.status if response else None,
-                html=html,
-                text=text,
-                captured_tooltip_text=captured_tooltip_text,
-                screenshot_path=screenshot_path,
-                html_path=html_path,
-                text_path=text_path,
-                used_persistent_profile=profile_dir is not None,
+                row_number=row_number,
+                research_row=research_row,
+                artifacts_dir=artifacts_dir,
                 profile_dir=profile_dir,
                 manual_wait_seconds=manual_wait_seconds,
-                seller_url=seller_url,
-                navigated_to_seller_page=bool(seller_url) or "/seller/" in page.url,
             )
-            (artifacts_dir / f"row_{row_number}.json").write_text(
-                json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            return result
         finally:
             context.close()
 

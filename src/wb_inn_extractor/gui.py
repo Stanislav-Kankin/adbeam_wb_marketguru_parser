@@ -17,7 +17,7 @@ from .excel_io import (
     save_batch_results,
     save_research_sample,
 )
-from .wb_research import inspect_product_row
+from .wb_research import BatchInspector, inspect_product_row
 
 
 class App:
@@ -265,40 +265,38 @@ class App:
 
         research_rows = read_research_rows_range(sample_path, start_row=start_row, limit=batch_count)
         output_rows = []
-        for offset, research_row in enumerate(research_rows, start=0):
-            row_number = start_row + offset
-            self._append_log(f"Batch: обрабатываю строку {row_number}...")
-            result = inspect_product_row(
-                row_number=row_number,
-                research_row=research_row,
-                artifacts_dir=artifacts_dir,
-                headful=True,
-                profile_dir=profile_dir,
-            )
-            output_rows.append({
-                "row_number": row_number,
-                "source_row_index": research_row.source_row_index,
-                "product_name": research_row.product_name,
-                "wb_nm_id": research_row.wb_nm_id,
-                "brand": research_row.brand,
-                "seller_name_raw": research_row.seller_name_raw,
-                "wb_candidate_url": research_row.wb_candidate_url,
-                "final_url": result.final_url,
-                "seller_url": result.seller_url,
-                "navigated_to_seller_page": result.navigated_to_seller_page,
-                "seller_display_name": result.seller_display_name,
-                "entity_type": result.entity_type,
-                "inn": result.inn,
-                "ogrn": result.ogrn,
-                "ogrnip": result.ogrnip,
-                "parse_status": result.parse_status,
-                "parse_note": result.note,
-                "http_status": result.http_status,
-                "used_persistent_profile": result.used_persistent_profile,
-                "screenshot_path": result.screenshot_path,
-                "html_path": result.html_path,
-                "text_path": result.text_path,
-            })
+        with BatchInspector(artifacts_dir=artifacts_dir, headful=True, profile_dir=profile_dir) as inspector:
+            for offset, research_row in enumerate(research_rows, start=0):
+                row_number = start_row + offset
+                self._append_log(f"Batch: обрабатываю строку {row_number}...")
+                result = inspector.inspect_row(
+                    row_number=row_number,
+                    research_row=research_row,
+                )
+                output_rows.append({
+                    "row_number": row_number,
+                    "source_row_index": research_row.source_row_index,
+                    "product_name": research_row.product_name,
+                    "wb_nm_id": research_row.wb_nm_id,
+                    "brand": research_row.brand,
+                    "seller_name_raw": research_row.seller_name_raw,
+                    "wb_candidate_url": research_row.wb_candidate_url,
+                    "final_url": result.final_url,
+                    "seller_url": result.seller_url,
+                    "navigated_to_seller_page": result.navigated_to_seller_page,
+                    "seller_display_name": result.seller_display_name,
+                    "entity_type": result.entity_type,
+                    "inn": result.inn,
+                    "ogrn": result.ogrn,
+                    "ogrnip": result.ogrnip,
+                    "parse_status": result.parse_status,
+                    "parse_note": result.note,
+                    "http_status": result.http_status,
+                    "used_persistent_profile": result.used_persistent_profile,
+                    "screenshot_path": result.screenshot_path,
+                    "html_path": result.html_path,
+                    "text_path": result.text_path,
+                })
             self._append_log(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "")
 
         save_batch_results(batch_output, output_rows)
