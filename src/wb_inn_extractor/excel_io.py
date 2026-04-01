@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections import Counter
 from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
@@ -128,6 +129,11 @@ def extract_research_rows(
     return result
 
 
+def summarize_research_rows_by_sheet(rows: list[ResearchRow]) -> dict[str, int]:
+    counter = Counter(row.source_sheet for row in rows)
+    return dict(sorted(counter.items(), key=lambda item: (item[0].casefold(), item[0])))
+
+
 def save_research_sample(output_path: Path, rows: list[ResearchRow]) -> None:
     workbook = Workbook()
     sheet = workbook.active
@@ -208,6 +214,7 @@ def save_batch_results(output_path: Path, rows: list[dict[str, Any]]) -> None:
     sheet.title = "batch_results"
     headers = [
         "row_number",
+        "source_sheet",
         "source_row_index",
         "product_name",
         "wb_nm_id",

@@ -109,6 +109,7 @@ def main() -> None:
                 )
                 output_rows.append({
                     "row_number": row_number,
+                    "source_sheet": research_row.source_sheet,
                     "source_row_index": research_row.source_row_index,
                     "product_name": research_row.product_name,
                     "wb_nm_id": research_row.wb_nm_id,

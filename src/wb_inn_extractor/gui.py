@@ -15,6 +15,7 @@ from .excel_io import (
     read_research_rows_range,
     save_batch_results,
     save_research_sample,
+    summarize_research_rows_by_sheet,
 )
 from .models import AnalyzeSummary
 from .wb_research import BatchInspector, inspect_product_row
@@ -39,6 +40,7 @@ class App:
         self.status_var = tk.StringVar(value="Готово")
         self.sheet_mode_var = tk.StringVar(value="all")
         self.sheet_summary_var = tk.StringVar(value="Листы ещё не проанализированы")
+        self.selection_summary_var = tk.StringVar(value="Выбор листов: все валидные после анализа")
         self._last_analyze_summary: AnalyzeSummary | None = None
 
         self._build_ui()
@@ -92,26 +94,28 @@ class App:
         sheet_frame.columnconfigure(0, weight=1)
         sheet_frame.rowconfigure(2, weight=1)
 
-        ttk.Label(sheet_frame, textvariable=self.sheet_summary_var, justify="left").grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        ttk.Label(sheet_frame, textvariable=self.sheet_summary_var, justify="left").grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        ttk.Label(sheet_frame, textvariable=self.selection_summary_var, justify="left").grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
         mode_frame = ttk.Frame(sheet_frame)
-        mode_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
-        ttk.Radiobutton(mode_frame, text="Использовать все валидные листы", value="all", variable=self.sheet_mode_var).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(mode_frame, text="Использовать только выбранные листы", value="selected", variable=self.sheet_mode_var).grid(row=0, column=1, sticky="w", padx=(16, 0))
+        mode_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        ttk.Radiobutton(mode_frame, text="Использовать все валидные листы", value="all", variable=self.sheet_mode_var, command=self._update_selection_summary).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(mode_frame, text="Использовать только выбранные листы", value="selected", variable=self.sheet_mode_var, command=self._update_selection_summary).grid(row=0, column=1, sticky="w", padx=(16, 0))
 
         list_frame = ttk.Frame(sheet_frame)
-        list_frame.grid(row=2, column=0, sticky="nsew")
+        list_frame.grid(row=3, column=0, sticky="nsew")
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
 
         self.sheet_listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
+        self.sheet_listbox.bind("<<ListboxSelect>>", self._on_sheet_selection_changed)
         self.sheet_listbox.grid(row=0, column=0, sticky="nsew")
         sheet_scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.sheet_listbox.yview)
         sheet_scrollbar.grid(row=0, column=1, sticky="ns")
         self.sheet_listbox.configure(yscrollcommand=sheet_scrollbar.set)
 
         sheet_buttons = ttk.Frame(sheet_frame)
-        sheet_buttons.grid(row=2, column=1, sticky="ns", padx=(12, 0))
+        sheet_buttons.grid(row=3, column=1, sticky="ns", padx=(12, 0))
         ttk.Button(sheet_buttons, text="Выбрать все", command=self._select_all_sheets).grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(sheet_buttons, text="Только валидные", command=self._select_valid_sheets).grid(row=1, column=0, sticky="ew", pady=6)
         ttk.Button(sheet_buttons, text="Снять выбор", command=self._clear_sheet_selection).grid(row=2, column=0, sticky="ew", pady=6)
@@ -162,6 +166,7 @@ class App:
             self._last_analyze_summary = None
             self.sheet_listbox.delete(0, "end")
             self.sheet_summary_var.set("Файл выбран. Нажми 'Проанализировать Excel', чтобы увидеть листы.")
+            self.selection_summary_var.set("Выбор листов: все валидные после анализа")
 
     def _choose_sample_output(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -251,17 +256,27 @@ class App:
         selected_sheets = self._resolve_selected_sheets_for_sample()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         rows = extract_research_rows(input_path, limit=limit, selected_sheets=selected_sheets)
-        save_research_sample(output_path, rows)
+        if not rows:
+            raise ValueError("Не удалось собрать ни одной строки для research sample")
 
-        sheet_scope_label = "все валидные листы"
-        if selected_sheets:
-            sheet_scope_label = ", ".join(selected_sheets)
+        save_research_sample(output_path, rows)
+        rows_by_sheet = summarize_research_rows_by_sheet(rows)
+
+        sheet_scope_label = self._build_sheet_scope_label(selected_sheets)
 
         self._append_log(f"Создан файл: {output_path}\n")
         self._append_log(f"Листы для sample: {sheet_scope_label}\n")
         if limit is None:
             self._append_log("Лимит строк не задан: в sample сохранены все уникальные продавцы по паре бренд+продавец\n")
         self._append_log(f"Строк (уникальных по продавцу+бренду): {len(rows)}\n")
+        self._append_log("Распределение строк по листам в sample:\n")
+        for sheet_name, count in rows_by_sheet.items():
+            self._append_log(f"  - {sheet_name}: {count}\n")
+
+        self.root.after(0, lambda: self.row_var.set("2"))
+        self.root.after(0, lambda: self.selection_summary_var.set(
+            f"Последний sample: {len(rows)} строк | листов в sample: {len(rows_by_sheet)} | старт inspect/batch сброшен на строку 2"
+        ))
 
     def _action_inspect(self) -> None:
         sample_path = self._require_sample_path()
@@ -375,6 +390,38 @@ class App:
             return None
         return Path(raw)
 
+    def _build_sheet_scope_label(self, selected_sheets: list[str] | None) -> str:
+        if not selected_sheets:
+            return "все валидные листы"
+        if len(selected_sheets) <= 5:
+            return ", ".join(selected_sheets)
+        preview = ", ".join(selected_sheets[:5])
+        return f"{preview} ... (+ещё {len(selected_sheets) - 5})"
+
+    def _update_selection_summary(self) -> None:
+        summary = self._last_analyze_summary
+        if summary is None:
+            self.selection_summary_var.set("Выбор листов: сначала проанализируй книгу")
+            return
+
+        if self.sheet_mode_var.get() == "all":
+            self.selection_summary_var.set(
+                f"Выбор листов: все валидные ({len(summary.valid_sheet_names)})"
+            )
+            return
+
+        selected_names = self._get_selected_sheet_names_from_ui()
+        if not selected_names:
+            self.selection_summary_var.set("Выбор листов: ничего не выбрано")
+            return
+
+        self.selection_summary_var.set(
+            f"Выбор листов: {len(selected_names)} | {self._build_sheet_scope_label(selected_names)}"
+        )
+
+    def _on_sheet_selection_changed(self, _event=None) -> None:
+        self._update_selection_summary()
+
     def _resolve_selected_sheets_for_sample(self) -> list[str] | None:
         summary = self._last_analyze_summary
         if summary is None:
@@ -401,6 +448,7 @@ class App:
             self.sheet_listbox.insert("end", f"[{status}] {sheet_name}")
 
         self._select_valid_sheets()
+        self._update_selection_summary()
         self.sheet_summary_var.set(
             "Всего листов в книге: "
             f"{summary.workbook_sheet_count} | валидных: {len(summary.valid_sheet_names)} | пропущенных: {len(summary.skipped_sheet_names)}"
@@ -434,6 +482,7 @@ class App:
         if self.sheet_listbox.size() == 0:
             return
         self.sheet_listbox.selection_set(0, "end")
+        self._update_selection_summary()
 
     def _select_valid_sheets(self) -> None:
         self.sheet_listbox.selection_clear(0, "end")
@@ -441,9 +490,11 @@ class App:
             raw_text = self.sheet_listbox.get(index)
             if raw_text.startswith("[VALID]"):
                 self.sheet_listbox.selection_set(index)
+        self._update_selection_summary()
 
     def _clear_sheet_selection(self) -> None:
         self.sheet_listbox.selection_clear(0, "end")
+        self._update_selection_summary()
 
     @staticmethod
     def _sheet_name_from_list_item(raw_text: str) -> str:
