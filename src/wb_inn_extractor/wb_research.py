@@ -133,45 +133,80 @@ class BatchInspector:
     def __enter__(self) -> "BatchInspector":
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = sync_playwright().start()
-        self._context = _open_context(playwright=self._playwright, headful=self.headful, profile_dir=self.profile_dir)
-        self._page = _fresh_batch_page(self._context)
+        self._restart_context()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self._context is not None:
-            self._context.close()
+        self._close_context()
         if self._playwright is not None:
             self._playwright.stop()
+            self._playwright = None
 
-    def inspect_row(self, row_number: int, research_row: ResearchRow) -> InspectResult:
+    def _close_context(self) -> None:
+        if self._context is not None:
+            try:
+                self._context.close()
+            except Exception:
+                pass
+            self._context = None
+        self._page = None
+
+    def _restart_context(self) -> None:
+        if self._playwright is None:
+            raise RuntimeError('Playwright is not started')
+        self._close_context()
+        self._context = _open_context(playwright=self._playwright, headful=self.headful, profile_dir=self.profile_dir)
+        self._page = _fresh_batch_page(self._context)
+
+    def _ensure_page(self) -> Page:
         if self._context is None:
             raise RuntimeError('BatchInspector is not started')
         if self._page is None or self._page.is_closed() or _is_unexpected_page_url(self._page.url):
             self._page = _fresh_batch_page(self._context)
+        return self._page
 
-        result = _inspect_product_row_on_page(
-            page=self._page,
-            row_number=row_number,
-            research_row=research_row,
-            artifacts_dir=self.artifacts_dir,
-            profile_dir=self.profile_dir,
-            manual_wait_seconds=0,
-        )
+    def inspect_row(self, row_number: int, research_row: ResearchRow) -> InspectResult:
+        if self._context is None:
+            raise RuntimeError('BatchInspector is not started')
 
-        if _is_unexpected_page_url(result.final_url):
-            self._page = _fresh_batch_page(self._context)
-            result = _inspect_product_row_on_page(
-                page=self._page,
-                row_number=row_number,
-                research_row=research_row,
-                artifacts_dir=self.artifacts_dir,
-                profile_dir=self.profile_dir,
-                manual_wait_seconds=0,
-            )
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                page = self._ensure_page()
+                result = _inspect_product_row_on_page(
+                    page=page,
+                    row_number=row_number,
+                    research_row=research_row,
+                    artifacts_dir=self.artifacts_dir,
+                    profile_dir=self.profile_dir,
+                    manual_wait_seconds=0,
+                )
 
-        if _is_unexpected_page_url(self._page.url):
-            self._page = _fresh_batch_page(self._context)
-        return result
+                if _is_unexpected_page_url(result.final_url):
+                    self._page = _fresh_batch_page(self._context)
+                    page = self._page
+                    result = _inspect_product_row_on_page(
+                        page=page,
+                        row_number=row_number,
+                        research_row=research_row,
+                        artifacts_dir=self.artifacts_dir,
+                        profile_dir=self.profile_dir,
+                        manual_wait_seconds=0,
+                    )
+
+                if self._page is not None and _is_unexpected_page_url(self._page.url):
+                    self._page = _fresh_batch_page(self._context)
+                return result
+            except Exception as exc:
+                last_error = exc
+                if attempt == 0 and _should_restart_context(exc):
+                    self._restart_context()
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError('inspect_row failed without explicit error')
 
 
 def _is_unexpected_page_url(url: str | None) -> bool:
@@ -185,17 +220,47 @@ def _is_unexpected_page_url(url: str | None) -> bool:
 
 
 def _fresh_batch_page(context: BrowserContext) -> Page:
+    reusable_page: Page | None = None
+    extra_pages: list[Page] = []
+
     for page in list(context.pages):
+        try:
+            if page.is_closed():
+                continue
+        except Exception:
+            continue
+
+        if reusable_page is None:
+            reusable_page = page
+        else:
+            extra_pages.append(page)
+
+    for page in extra_pages:
         try:
             page.close()
         except Exception:
             pass
-    page = context.new_page()
+
+    if reusable_page is None:
+        reusable_page = context.new_page()
+
     try:
-        page.goto('about:blank', wait_until='domcontentloaded', timeout=1_500)
+        reusable_page.goto('about:blank', wait_until='domcontentloaded', timeout=1_500)
     except Exception:
         pass
-    return page
+    return reusable_page
+
+
+def _should_restart_context(exc: Exception) -> bool:
+    message = str(exc).lower()
+    restart_markers = [
+        'failed to open a new tab',
+        'target.createtarget',
+        'target page, context or browser has been closed',
+        'browser has been closed',
+        'context has been closed',
+    ]
+    return any(marker in message for marker in restart_markers)
 
 
 def _inspect_product_row_on_page(

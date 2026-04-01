@@ -6,18 +6,40 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class SheetAnalyzeSummary(BaseModel):
+    sheet_name: str
+    status: str
+    reason: str | None = None
+    detected_header_row: int | None = None
+    total_rows_scanned: int = 0
+    total_columns: int = 0
+    data_rows_count: int = 0
+    headers: list[str] = Field(default_factory=list)
+    preview_rows: list[dict[str, Any]] = Field(default_factory=list)
+    has_seller_name: bool = False
+    has_brand: bool = False
+    has_wb_url: bool = False
+    has_article: bool = False
+    candidate_key_field: str | None = None
+
+
 class AnalyzeSummary(BaseModel):
     input_path: Path
-    sheet_name: str
-    total_rows: int
-    total_columns: int
-    headers: list[str]
-    has_seller_name: bool
-    has_brand: bool
-    has_wb_url: bool
-    has_article: bool
-    candidate_key_field: str | None
+    workbook_sheet_count: int
+    selected_sheet_names: list[str] = Field(default_factory=list)
+    skipped_sheet_names: list[str] = Field(default_factory=list)
+    valid_sheet_names: list[str] = Field(default_factory=list)
+    sheet_name: str | None = None
+    total_rows: int = 0
+    total_columns: int = 0
+    headers: list[str] = Field(default_factory=list)
+    has_seller_name: bool = False
+    has_brand: bool = False
+    has_wb_url: bool = False
+    has_article: bool = False
+    candidate_key_field: str | None = None
     preview_rows: list[dict[str, Any]] = Field(default_factory=list)
+    sheets: list[SheetAnalyzeSummary] = Field(default_factory=list)
 
 
 class ResearchRow(BaseModel):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import threading
@@ -17,6 +16,7 @@ from .excel_io import (
     save_batch_results,
     save_research_sample,
 )
+from .models import AnalyzeSummary
 from .wb_research import BatchInspector, inspect_product_row
 
 
@@ -24,8 +24,8 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("WB INN Extractor — Research MVP")
-        self.root.geometry("1180x820")
-        self.root.minsize(1040, 720)
+        self.root.geometry("1280x900")
+        self.root.minsize(1120, 760)
 
         self.input_path_var = tk.StringVar()
         self.sample_output_var = tk.StringVar(value=str(Path("output/research_sample.xlsx")))
@@ -37,6 +37,9 @@ class App:
         self.batch_output_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
         self.headful_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Готово")
+        self.sheet_mode_var = tk.StringVar(value="all")
+        self.sheet_summary_var = tk.StringVar(value="Листы ещё не проанализированы")
+        self._last_analyze_summary: AnalyzeSummary | None = None
 
         self._build_ui()
 
@@ -46,7 +49,7 @@ class App:
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
 
-        container.rowconfigure(4, weight=1)
+        container.rowconfigure(6, weight=1)
         container.columnconfigure(1, weight=1)
 
         ttk.Label(container, text="Входной Excel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
@@ -84,15 +87,44 @@ class App:
 
         ttk.Checkbutton(options, text="Показывать браузер при обычном inspect", variable=self.headful_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        sheet_frame = ttk.LabelFrame(container, text="Листы Excel", padding=12)
+        sheet_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(0, 12))
+        sheet_frame.columnconfigure(0, weight=1)
+        sheet_frame.rowconfigure(2, weight=1)
+
+        ttk.Label(sheet_frame, textvariable=self.sheet_summary_var, justify="left").grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+
+        mode_frame = ttk.Frame(sheet_frame)
+        mode_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        ttk.Radiobutton(mode_frame, text="Использовать все валидные листы", value="all", variable=self.sheet_mode_var).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(mode_frame, text="Использовать только выбранные листы", value="selected", variable=self.sheet_mode_var).grid(row=0, column=1, sticky="w", padx=(16, 0))
+
+        list_frame = ttk.Frame(sheet_frame)
+        list_frame.grid(row=2, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        self.sheet_listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=8, exportselection=False)
+        self.sheet_listbox.grid(row=0, column=0, sticky="nsew")
+        sheet_scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.sheet_listbox.yview)
+        sheet_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.sheet_listbox.configure(yscrollcommand=sheet_scrollbar.set)
+
+        sheet_buttons = ttk.Frame(sheet_frame)
+        sheet_buttons.grid(row=2, column=1, sticky="ns", padx=(12, 0))
+        ttk.Button(sheet_buttons, text="Выбрать все", command=self._select_all_sheets).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(sheet_buttons, text="Только валидные", command=self._select_valid_sheets).grid(row=1, column=0, sticky="ew", pady=6)
+        ttk.Button(sheet_buttons, text="Снять выбор", command=self._clear_sheet_selection).grid(row=2, column=0, sticky="ew", pady=6)
+
         hint = (
-            "Обычный inspect теперь по умолчанию использует папку профиля WB, если она заполнена. "
-            "Это безопаснее для WB, чем каждый раз открывать новый чистый браузер. "
+            "1) Нажми 'Проанализировать Excel'. 2) Посмотри список листов и выбери режим: все валидные или только нужные. "
+            "3) Создай sample только по выбранным листам. Обычный inspect использует папку профиля WB, если она заполнена. "
             "Папка профиля WB и папка артефактов должны быть разными."
         )
-        ttk.Label(container, text=hint, wraplength=1120, justify="left").grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        ttk.Label(container, text=hint, wraplength=1220, justify="left").grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
 
         actions = ttk.Frame(container)
-        actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         for idx in range(4):
             actions.columnconfigure(idx, weight=1)
 
@@ -102,7 +134,7 @@ class App:
         ttk.Button(actions, text="4. Пакетный прогон", command=lambda: self._run_in_thread(self._action_batch)).grid(row=0, column=3, sticky="ew", padx=(4, 0))
 
         tools = ttk.Frame(container)
-        tools.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        tools.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         for idx in range(3):
             tools.columnconfigure(idx, weight=1)
         ttk.Button(tools, text="Открыть папку артефактов", command=self._open_artifacts_dir).grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -110,8 +142,7 @@ class App:
         ttk.Button(tools, text="Открыть результаты", command=self._open_batch_results).grid(row=0, column=2, sticky="ew", padx=(8, 0))
 
         log_frame = ttk.LabelFrame(container, text="Лог / результат", padding=8)
-        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
-        container.rowconfigure(5, weight=1)
+        log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
 
@@ -122,12 +153,15 @@ class App:
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
         status_bar = ttk.Label(container, textvariable=self.status_var, anchor="w")
-        status_bar.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        status_bar.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
     def _choose_input_file(self) -> None:
         path = filedialog.askopenfilename(title="Выбери Excel-файл", filetypes=[("Excel", "*.xlsx *.xlsm *.xls")])
         if path:
             self.input_path_var.set(path)
+            self._last_analyze_summary = None
+            self.sheet_listbox.delete(0, "end")
+            self.sheet_summary_var.set("Файл выбран. Нажми 'Проанализировать Excel', чтобы увидеть листы.")
 
     def _choose_sample_output(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -148,7 +182,6 @@ class App:
         path = filedialog.askdirectory(title="Папка профиля WB")
         if path:
             self.profile_dir_var.set(path)
-
 
     def _choose_batch_output(self) -> None:
         current = Path(self.batch_output_var.get()) if self.batch_output_var.get().strip() else Path("output/batch_results.xlsx")
@@ -201,22 +234,31 @@ class App:
             self._append_log(f"{exc}\n")
             self._append_log(traceback.format_exc())
             self._set_status("Ошибка")
-            self.root.after(0, lambda: messagebox.showerror("Ошибка", str(exec)))
+            self.root.after(0, lambda exc=exc: messagebox.showerror("Ошибка", str(exc)))
 
     def _action_analyze(self) -> None:
         input_path = self._require_input_path()
         summary = analyze_workbook(input_path)
-        self._append_log(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n")
+        self._last_analyze_summary = summary
+        self.root.after(0, lambda summary=summary: self._apply_analyze_summary(summary))
+        self._append_log(self._format_analyze_summary(summary))
 
     def _action_sample(self) -> None:
         input_path = self._require_input_path()
         output_path = Path(self.sample_output_var.get())
         raw_limit = self.limit_var.get().strip()
         limit = self._parse_positive_int(raw_limit, field_name="Лимит строк") if raw_limit else None
+        selected_sheets = self._resolve_selected_sheets_for_sample()
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = extract_research_rows(input_path, limit=limit)
+        rows = extract_research_rows(input_path, limit=limit, selected_sheets=selected_sheets)
         save_research_sample(output_path, rows)
+
+        sheet_scope_label = "все валидные листы"
+        if selected_sheets:
+            sheet_scope_label = ", ".join(selected_sheets)
+
         self._append_log(f"Создан файл: {output_path}\n")
+        self._append_log(f"Листы для sample: {sheet_scope_label}\n")
         if limit is None:
             self._append_log("Лимит строк не задан: в sample сохранены все уникальные продавцы по паре бренд+продавец\n")
         self._append_log(f"Строк (уникальных по продавцу+бренду): {len(rows)}\n")
@@ -245,7 +287,9 @@ class App:
             headful=self.headful_var.get() or profile_dir is not None,
             profile_dir=profile_dir,
         )
-        self._append_log(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n")
+        self._append_log(f"Inspect: sheet={research_row.source_sheet}, source_row_index={research_row.source_row_index}\n")
+        self._append_log(f"Inspect: seller={research_row.seller_name_raw}, brand={research_row.brand}\n")
+        self._append_log(f"Inspect: status={result.parse_status}, inn={result.inn}, ogrn={result.ogrn}, ogrnip={result.ogrnip}\n")
         self.root.after(0, lambda: messagebox.showinfo("Проверка завершена", f"Артефакты сохранены в:\n{artifacts_dir}"))
 
     def _action_batch(self) -> None:
@@ -268,7 +312,9 @@ class App:
         with BatchInspector(artifacts_dir=artifacts_dir, headful=True, profile_dir=profile_dir) as inspector:
             for offset, research_row in enumerate(research_rows, start=0):
                 row_number = start_row + offset
-                self._append_log(f"Batch: обрабатываю строку {row_number}...")
+                self._append_log(
+                    f"Batch: обрабатываю строку {row_number} | sheet={research_row.source_sheet} | seller={research_row.seller_name_raw}\n"
+                )
                 result = inspector.inspect_row(
                     row_number=row_number,
                     research_row=research_row,
@@ -297,10 +343,10 @@ class App:
                     "html_path": result.html_path,
                     "text_path": result.text_path,
                 })
-            self._append_log(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "")
+                self._append_log(f"Batch: строка {row_number} завершена, status={result.parse_status}, inn={result.inn}\n")
 
         save_batch_results(batch_output, output_rows)
-        self.root.after(0, lambda: messagebox.showinfo("Batch завершён", f"Итоговый Excel сохранён:{batch_output}"))
+        self.root.after(0, lambda: messagebox.showinfo("Batch завершён", f"Итоговый Excel сохранён:\n{batch_output}"))
 
     def _require_input_path(self) -> Path:
         input_value = self.input_path_var.get().strip()
@@ -328,6 +374,83 @@ class App:
         if not raw:
             return None
         return Path(raw)
+
+    def _resolve_selected_sheets_for_sample(self) -> list[str] | None:
+        summary = self._last_analyze_summary
+        if summary is None:
+            return None
+
+        if self.sheet_mode_var.get() == "all":
+            return list(summary.valid_sheet_names)
+
+        selected_names = self._get_selected_sheet_names_from_ui()
+        if not selected_names:
+            raise ValueError("В режиме 'только выбранные листы' нужно выбрать хотя бы один лист")
+
+        valid_set = set(summary.valid_sheet_names)
+        invalid_selected = [sheet_name for sheet_name in selected_names if sheet_name not in valid_set]
+        if invalid_selected:
+            raise ValueError("Нельзя строить sample по невалидным листам: " + ", ".join(invalid_selected))
+        return selected_names
+
+    def _apply_analyze_summary(self, summary: AnalyzeSummary) -> None:
+        self.sheet_listbox.delete(0, "end")
+        valid_set = set(summary.valid_sheet_names)
+        for sheet_name in summary.selected_sheet_names:
+            status = "VALID" if sheet_name in valid_set else "SKIPPED"
+            self.sheet_listbox.insert("end", f"[{status}] {sheet_name}")
+
+        self._select_valid_sheets()
+        self.sheet_summary_var.set(
+            "Всего листов в книге: "
+            f"{summary.workbook_sheet_count} | валидных: {len(summary.valid_sheet_names)} | пропущенных: {len(summary.skipped_sheet_names)}"
+        )
+
+    def _format_analyze_summary(self, summary: AnalyzeSummary) -> str:
+        lines = [
+            f"Книга: {summary.input_path}",
+            f"Всего листов: {summary.workbook_sheet_count}",
+            f"Валидных листов: {len(summary.valid_sheet_names)}",
+            f"Пропущенных листов: {len(summary.skipped_sheet_names)}",
+        ]
+        for sheet in summary.sheets:
+            line = f"- {sheet.sheet_name}: {sheet.status}"
+            if sheet.status == "VALID":
+                line += f", data_rows={sheet.data_rows_count}, header_row={sheet.detected_header_row}"
+            elif sheet.reason:
+                line += f", reason={sheet.reason}"
+            lines.append(line)
+        lines.append("")
+        return "\n".join(lines)
+
+    def _get_selected_sheet_names_from_ui(self) -> list[str]:
+        names: list[str] = []
+        for index in self.sheet_listbox.curselection():
+            raw_text = self.sheet_listbox.get(index)
+            names.append(self._sheet_name_from_list_item(raw_text))
+        return names
+
+    def _select_all_sheets(self) -> None:
+        if self.sheet_listbox.size() == 0:
+            return
+        self.sheet_listbox.selection_set(0, "end")
+
+    def _select_valid_sheets(self) -> None:
+        self.sheet_listbox.selection_clear(0, "end")
+        for index in range(self.sheet_listbox.size()):
+            raw_text = self.sheet_listbox.get(index)
+            if raw_text.startswith("[VALID]"):
+                self.sheet_listbox.selection_set(index)
+
+    def _clear_sheet_selection(self) -> None:
+        self.sheet_listbox.selection_clear(0, "end")
+
+    @staticmethod
+    def _sheet_name_from_list_item(raw_text: str) -> str:
+        parts = raw_text.split("] ", maxsplit=1)
+        if len(parts) == 2:
+            return parts[1]
+        return raw_text
 
     @staticmethod
     def _parse_positive_int(raw_value: str, field_name: str) -> int:

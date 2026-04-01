@@ -21,11 +21,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     analyze_parser = subparsers.add_parser("analyze", help="Проанализировать структуру входного Excel")
     analyze_parser.add_argument("--input", required=True, type=Path)
+    analyze_parser.add_argument("--sheet", dest="selected_sheets", action="append", default=None)
 
     sample_parser = subparsers.add_parser("sample", help="Подготовить research-выборку")
     sample_parser.add_argument("--input", required=True, type=Path)
     sample_parser.add_argument("--output", type=Path, default=Path("output/research_sample.xlsx"))
     sample_parser.add_argument("--limit", type=int, default=None)
+    sample_parser.add_argument("--sheet", dest="selected_sheets", action="append", default=None)
 
     inspect_parser = subparsers.add_parser("inspect-row", help="Открыть одну строку через Playwright и сохранить артефакты")
     inspect_parser.add_argument("--input", required=True, type=Path)
@@ -57,13 +59,13 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "analyze":
-        summary = analyze_workbook(args.input)
+        summary = analyze_workbook(args.input, selected_sheets=args.selected_sheets)
         print(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False, indent=2))
         return
 
     if args.command == "sample":
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        rows = extract_research_rows(args.input, limit=args.limit)
+        rows = extract_research_rows(args.input, limit=args.limit, selected_sheets=args.selected_sheets)
         save_research_sample(args.output, rows)
         print(f"Создан файл: {args.output}")
         print(f"Строк (уникальных по продавцу+бренду): {len(rows)}")
