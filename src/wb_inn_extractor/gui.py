@@ -13,6 +13,7 @@ from .excel_io import (
     extract_research_rows,
     read_research_row,
     read_research_rows_range,
+    merge_batch_results_with_compass,
     save_batch_results,
     save_research_sample,
     summarize_research_rows_by_sheet,
@@ -36,6 +37,8 @@ class App:
         self.row_var = tk.StringVar(value="2")
         self.batch_count_var = tk.StringVar(value="5")
         self.batch_output_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
+        self.compass_input_var = tk.StringVar()
+        self.enriched_output_var = tk.StringVar(value=str(Path("output/final_enriched.xlsx")))
         self.headful_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Готово")
         self.sheet_mode_var = tk.StringVar(value="all")
@@ -87,7 +90,15 @@ class App:
         ttk.Entry(options, textvariable=self.batch_output_var).grid(row=6, column=1, sticky="ew", padx=(8, 8), pady=4)
         ttk.Button(options, text="Выбрать", command=self._choose_batch_output).grid(row=6, column=2, sticky="ew", pady=4)
 
-        ttk.Checkbutton(options, text="Показывать браузер при обычном inspect", variable=self.headful_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(options, text="Выгрузка Compass").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Entry(options, textvariable=self.compass_input_var).grid(row=7, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(options, text="Выбрать", command=self._choose_compass_input).grid(row=7, column=2, sticky="ew", pady=4)
+
+        ttk.Label(options, text="Итоговый enriched Excel").grid(row=8, column=0, sticky="w", pady=4)
+        ttk.Entry(options, textvariable=self.enriched_output_var).grid(row=8, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(options, text="Выбрать", command=self._choose_enriched_output).grid(row=8, column=2, sticky="ew", pady=4)
+
+        ttk.Checkbutton(options, text="Показывать браузер при обычном inspect", variable=self.headful_var).grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         sheet_frame = ttk.LabelFrame(container, text="Листы Excel", padding=12)
         sheet_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(0, 12))
@@ -129,13 +140,14 @@ class App:
 
         actions = ttk.Frame(container)
         actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-        for idx in range(4):
+        for idx in range(5):
             actions.columnconfigure(idx, weight=1)
 
         ttk.Button(actions, text="1. Проанализировать Excel", command=lambda: self._run_in_thread(self._action_analyze)).grid(row=0, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(actions, text="2. Создать research sample", command=lambda: self._run_in_thread(self._action_sample)).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(actions, text="3. Проверить строку", command=lambda: self._run_in_thread(self._action_inspect)).grid(row=0, column=2, sticky="ew", padx=4)
-        ttk.Button(actions, text="4. Пакетный прогон", command=lambda: self._run_in_thread(self._action_batch)).grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        ttk.Button(actions, text="4. Пакетный прогон", command=lambda: self._run_in_thread(self._action_batch)).grid(row=0, column=3, sticky="ew", padx=4)
+        ttk.Button(actions, text="5. Склеить с Compass", command=lambda: self._run_in_thread(self._action_merge_compass)).grid(row=0, column=4, sticky="ew", padx=(4, 0))
 
         tools = ttk.Frame(container)
         tools.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
@@ -187,6 +199,23 @@ class App:
         path = filedialog.askdirectory(title="Папка профиля WB")
         if path:
             self.profile_dir_var.set(path)
+
+    def _choose_compass_input(self) -> None:
+        path = filedialog.askopenfilename(title="Выбери выгрузку Compass", filetypes=[("Excel", "*.xlsx *.xlsm *.xls")])
+        if path:
+            self.compass_input_var.set(path)
+
+    def _choose_enriched_output(self) -> None:
+        current = Path(self.enriched_output_var.get()) if self.enriched_output_var.get().strip() else Path("output/final_enriched.xlsx")
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить enriched Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=current.name,
+            initialdir=str(current.parent),
+        )
+        if path:
+            self.enriched_output_var.set(path)
 
     def _choose_batch_output(self) -> None:
         current = Path(self.batch_output_var.get()) if self.batch_output_var.get().strip() else Path("output/batch_results.xlsx")
@@ -336,6 +365,7 @@ class App:
                 )
                 output_rows.append({
                     "row_number": row_number,
+                    "source_sheet": research_row.source_sheet,
                     "source_row_index": research_row.source_row_index,
                     "product_name": research_row.product_name,
                     "wb_nm_id": research_row.wb_nm_id,
@@ -357,11 +387,54 @@ class App:
                     "screenshot_path": result.screenshot_path,
                     "html_path": result.html_path,
                     "text_path": result.text_path,
+                    "marketguru_source_sheet": research_row.source_sheet,
+                    "marketguru_source_row_index": research_row.source_row_index,
+                    "marketguru_product_name": research_row.product_name,
+                    "marketguru_brand": research_row.brand,
+                    "marketguru_seller_name": research_row.seller_name_raw,
+                    "marketguru_wb_nm_id": research_row.wb_nm_id,
+                    "marketguru_candidate_url": research_row.wb_candidate_url,
+                    "wb_seller_name": result.seller_display_name,
+                    "wb_seller_url": result.seller_url,
                 })
                 self._append_log(f"Batch: строка {row_number} завершена, status={result.parse_status}, inn={result.inn}\n")
 
         save_batch_results(batch_output, output_rows)
         self.root.after(0, lambda: messagebox.showinfo("Batch завершён", f"Итоговый Excel сохранён:\n{batch_output}"))
+
+
+    def _action_merge_compass(self) -> None:
+        batch_results_path = Path(self.batch_output_var.get().strip() or "output/batch_results.xlsx")
+        if not batch_results_path.exists():
+            raise FileNotFoundError(f"Не найден batch_results.xlsx: {batch_results_path}")
+
+        compass_value = self.compass_input_var.get().strip()
+        if not compass_value:
+            raise ValueError("Сначала выбери выгрузку Compass")
+        compass_path = Path(compass_value)
+        if not compass_path.exists():
+            raise FileNotFoundError(f"Не найден файл Compass: {compass_path}")
+
+        output_path = Path(self.enriched_output_var.get().strip() or "output/final_enriched.xlsx")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._append_log(f"Merge Compass: batch={batch_results_path}\n")
+        self._append_log(f"Merge Compass: compass={compass_path}\n")
+        summary = merge_batch_results_with_compass(
+            batch_results_path=batch_results_path,
+            compass_path=compass_path,
+            output_path=output_path,
+        )
+        self._append_log(
+            "Merge Compass: "
+            f"batch_rows={summary['batch_rows']}, matched={summary['matched_rows']}, unmatched={summary['unmatched_rows']}\n"
+        )
+        self._append_log(
+            "Merge Compass: "
+            f"sheet={summary['compass_sheet_name']}, inn_header={summary['compass_inn_header']}, indexed={summary['compass_rows_indexed']}\n"
+        )
+        self._append_log(f"Merge Compass: создан файл {output_path}\n")
+        self.root.after(0, lambda: messagebox.showinfo("Merge Compass завершён", f"Итоговый enriched Excel сохранён:\n{output_path}"))
 
     def _require_input_path(self) -> Path:
         input_value = self.input_path_var.get().strip()

@@ -19,6 +19,13 @@ REQUIRED_HEADERS = {
 
 HEADER_SCAN_LIMIT = 20
 PREVIEW_LIMIT = 5
+COMPASS_INN_HEADER_CANDIDATES = [
+    "ИНН",
+    "ИНН ЮЛ",
+    "ИНН ЮЛ/ИП",
+    "ИНН компании",
+    "ИНН контрагента",
+]
 
 
 def load_active_sheet(input_path: Path):
@@ -176,21 +183,6 @@ def read_research_row(input_path: Path, row_number: int) -> ResearchRow:
     return ResearchRow(**data)
 
 
-
-def _normalize_key_part(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip().casefold()
-
-
-def _get_cell(row: list[Any] | tuple[Any, ...], header_index: dict[str, int], header_name: str) -> Any:
-    index = header_index.get(header_name)
-    if index is None or index >= len(row):
-        return None
-    return row[index]
-
-
-
 def read_research_rows_range(input_path: Path, start_row: int = 2, limit: int = 10) -> list[ResearchRow]:
     workbook = load_workbook(input_path, read_only=True, data_only=True)
     sheet = workbook[workbook.sheetnames[0]]
@@ -205,7 +197,6 @@ def read_research_rows_range(input_path: Path, start_row: int = 2, limit: int = 
         data = dict(zip(headers, target[0], strict=False))
         result.append(ResearchRow(**data))
     return result
-
 
 
 def save_batch_results(output_path: Path, rows: list[dict[str, Any]]) -> None:
@@ -236,12 +227,185 @@ def save_batch_results(output_path: Path, rows: list[dict[str, Any]]) -> None:
         "screenshot_path",
         "html_path",
         "text_path",
+        "marketguru_source_sheet",
+        "marketguru_source_row_index",
+        "marketguru_product_name",
+        "marketguru_brand",
+        "marketguru_seller_name",
+        "marketguru_wb_nm_id",
+        "marketguru_candidate_url",
+        "wb_seller_name",
+        "wb_seller_url",
     ]
     sheet.append(headers)
     for row in rows:
-        sheet.append([row.get(header) for header in headers])
+        normalized_row = dict(row)
+        normalized_row.setdefault("marketguru_source_sheet", row.get("source_sheet"))
+        normalized_row.setdefault("marketguru_source_row_index", row.get("source_row_index"))
+        normalized_row.setdefault("marketguru_product_name", row.get("product_name"))
+        normalized_row.setdefault("marketguru_brand", row.get("brand"))
+        normalized_row.setdefault("marketguru_seller_name", row.get("seller_name_raw"))
+        normalized_row.setdefault("marketguru_wb_nm_id", row.get("wb_nm_id"))
+        normalized_row.setdefault("marketguru_candidate_url", row.get("wb_candidate_url"))
+        normalized_row.setdefault("wb_seller_name", row.get("seller_display_name"))
+        normalized_row.setdefault("wb_seller_url", row.get("seller_url"))
+        sheet.append([normalized_row.get(header) for header in headers])
     workbook.save(output_path)
 
+
+def merge_batch_results_with_compass(
+    batch_results_path: Path,
+    compass_path: Path,
+    output_path: Path,
+) -> dict[str, Any]:
+    batch_rows = _read_sheet_as_dicts(batch_results_path)
+    compass_payload = _read_compass_rows(compass_path)
+    compass_index = compass_payload["index"]
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "final_enriched"
+
+    batch_headers = batch_payload_headers = batch_rows[0].keys() if batch_rows else []
+    compass_headers = compass_payload["headers"]
+    output_headers = list(batch_headers) + [
+        "merge_inn_normalized",
+        "compass_match_found",
+        "compass_match_count",
+        "compass_source_sheet",
+        "compass_inn_header",
+    ] + [f"compass_{header}" for header in compass_headers]
+    sheet.append(output_headers)
+
+    matched_rows = 0
+    unmatched_rows = 0
+    for row in batch_rows:
+        normalized_inn = _normalize_inn_value(row.get("inn"))
+        matches = compass_index.get(normalized_inn, []) if normalized_inn else []
+        selected_match = matches[0] if matches else None
+        if matches:
+            matched_rows += 1
+        else:
+            unmatched_rows += 1
+
+        output_row = dict(row)
+        output_row["merge_inn_normalized"] = normalized_inn
+        output_row["compass_match_found"] = bool(matches)
+        output_row["compass_match_count"] = len(matches)
+        output_row["compass_source_sheet"] = compass_payload["sheet_name"] if matches else None
+        output_row["compass_inn_header"] = compass_payload["inn_header"] if matches else None
+        for header in compass_headers:
+            output_row[f"compass_{header}"] = selected_match.get(header) if selected_match else None
+        sheet.append([output_row.get(header) for header in output_headers])
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(output_path)
+    return {
+        "batch_rows": len(batch_rows),
+        "matched_rows": matched_rows,
+        "unmatched_rows": unmatched_rows,
+        "compass_sheet_name": compass_payload["sheet_name"],
+        "compass_inn_header": compass_payload["inn_header"],
+        "compass_rows_indexed": compass_payload["rows_indexed"],
+        "output_path": str(output_path),
+    }
+
+
+def _read_compass_rows(compass_path: Path) -> dict[str, Any]:
+    workbook = load_workbook(compass_path, read_only=True, data_only=True)
+    for sheet_name in workbook.sheetnames:
+        sheet = workbook[sheet_name]
+        rows_iter = sheet.iter_rows(values_only=True)
+        try:
+            header_row = next(rows_iter)
+        except StopIteration:
+            continue
+        headers = [_coerce_header(value) for value in header_row]
+        if not any(headers):
+            continue
+        inn_header = _resolve_compass_inn_header(headers)
+        if inn_header is None:
+            continue
+
+        index: dict[str, list[dict[str, Any]]] = {}
+        rows_indexed = 0
+        for row in rows_iter:
+            row_dict = dict(zip(headers, row, strict=False))
+            normalized_inn = _normalize_inn_value(row_dict.get(inn_header))
+            if not normalized_inn:
+                continue
+            index.setdefault(normalized_inn, []).append(row_dict)
+            rows_indexed += 1
+
+        return {
+            "sheet_name": sheet_name,
+            "headers": headers,
+            "inn_header": inn_header,
+            "rows_indexed": rows_indexed,
+            "index": index,
+        }
+    raise ValueError("В выгрузке Compass не найдена колонка ИНН. Проверь Excel и заголовки столбцов.")
+
+
+def _read_sheet_as_dicts(input_path: Path) -> list[dict[str, Any]]:
+    workbook = load_workbook(input_path, read_only=True, data_only=True)
+    sheet = workbook[workbook.sheetnames[0]]
+    rows_iter = sheet.iter_rows(values_only=True)
+    try:
+        header_row = next(rows_iter)
+    except StopIteration as exc:
+        raise ValueError(f"Пустой Excel: {input_path}") from exc
+    headers = [_coerce_header(value) for value in header_row]
+    result: list[dict[str, Any]] = []
+    for row in rows_iter:
+        row_dict = dict(zip(headers, row, strict=False))
+        if _is_effectively_empty_row(row_dict.values()):
+            continue
+        result.append(row_dict)
+    return result
+
+
+def _resolve_compass_inn_header(headers: list[str]) -> str | None:
+    normalized_map = {header.casefold(): header for header in headers if header}
+    for candidate in COMPASS_INN_HEADER_CANDIDATES:
+        found = normalized_map.get(candidate.casefold())
+        if found:
+            return found
+    for header in headers:
+        normalized = header.casefold()
+        if "инн" in normalized:
+            return header
+    return None
+
+
+def _normalize_inn_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if value.is_integer():
+            value = int(value)
+        else:
+            value = str(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith('.0'):
+        text = text[:-2]
+    digits = ''.join(ch for ch in text if ch.isdigit())
+    return digits or None
+
+
+def _normalize_key_part(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().casefold()
+
+
+def _get_cell(row: list[Any] | tuple[Any, ...], header_index: dict[str, int], header_name: str) -> Any:
+    index = header_index.get(header_name)
+    if index is None or index >= len(row):
+        return None
+    return row[index]
 
 
 def _normalize_sheet_selection(all_sheet_names: list[str], selected_sheets: list[str] | None) -> list[str]:
@@ -252,7 +416,6 @@ def _normalize_sheet_selection(all_sheet_names: list[str], selected_sheets: list
     if missing:
         raise ValueError(f"Не найдены листы: {', '.join(missing)}")
     return selected_sheets
-
 
 
 def _analyze_sheet(sheet: Worksheet) -> SheetAnalyzeSummary:
@@ -294,7 +457,6 @@ def _analyze_sheet(sheet: Worksheet) -> SheetAnalyzeSummary:
     )
 
 
-
 def _prepare_sheet_meta(sheet: Worksheet) -> dict[str, Any] | None:
     scanned_rows: list[list[Any]] = []
     header_row_index: int | None = None
@@ -330,7 +492,6 @@ def _prepare_sheet_meta(sheet: Worksheet) -> dict[str, Any] | None:
     }
 
 
-
 def _collect_preview_rows(sheet: Worksheet, header_row_index: int, headers: list[str]) -> list[dict[str, Any]]:
     preview_rows: list[dict[str, Any]] = []
     for row in sheet.iter_rows(min_row=header_row_index + 1, values_only=True):
@@ -343,18 +504,15 @@ def _collect_preview_rows(sheet: Worksheet, header_row_index: int, headers: list
     return preview_rows
 
 
-
 def _is_required_header_row(headers: Iterable[str]) -> bool:
     header_set = {header.strip() for header in headers if header and header.strip()}
     return all(required_header in header_set for required_header in REQUIRED_HEADERS.values())
-
 
 
 def _coerce_header(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
 
 
 def _coerce_to_string(value: Any) -> str | None:
@@ -369,7 +527,6 @@ def _coerce_to_string(value: Any) -> str | None:
     return normalized or None
 
 
-
 def _coerce_wb_nm_id(value: Any) -> int | None:
     if value in (None, "", "—"):
         return None
@@ -381,7 +538,6 @@ def _coerce_wb_nm_id(value: Any) -> int | None:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return None
-
 
 
 def _is_effectively_empty_row(row: Iterable[Any]) -> bool:

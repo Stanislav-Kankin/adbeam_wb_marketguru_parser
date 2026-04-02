@@ -7,6 +7,7 @@ from pathlib import Path
 from .excel_io import (
     analyze_workbook,
     extract_research_rows,
+    merge_batch_results_with_compass,
     read_research_row,
     read_research_rows_range,
     save_batch_results,
@@ -51,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--artifacts-dir", type=Path, default=Path("output/batch_artifacts"))
     batch_parser.add_argument("--profile-dir", type=Path, default=Path("output/wb_profile"))
 
+    merge_parser = subparsers.add_parser("merge-compass", help="Склеить batch_results.xlsx с выгрузкой Compass по ИНН")
+    merge_parser.add_argument("--batch-results", required=True, type=Path)
+    merge_parser.add_argument("--compass", required=True, type=Path)
+    merge_parser.add_argument("--output", type=Path, default=Path("output/final_enriched.xlsx"))
+
     return parser
 
 
@@ -88,7 +94,6 @@ def main() -> None:
         )
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
         return
-
 
     if args.command == "batch-run":
         if args.artifacts_dir.resolve() == args.profile_dir.resolve():
@@ -131,8 +136,17 @@ def main() -> None:
                     "screenshot_path": result.screenshot_path,
                     "html_path": result.html_path,
                     "text_path": result.text_path,
+                    "marketguru_source_sheet": research_row.source_sheet,
+                    "marketguru_source_row_index": research_row.source_row_index,
+                    "marketguru_product_name": research_row.product_name,
+                    "marketguru_brand": research_row.brand,
+                    "marketguru_seller_name": research_row.seller_name_raw,
+                    "marketguru_wb_nm_id": research_row.wb_nm_id,
+                    "marketguru_candidate_url": research_row.wb_candidate_url,
+                    "wb_seller_name": result.seller_display_name,
+                    "wb_seller_url": result.seller_url,
                 })
-            print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
+                print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
 
         save_batch_results(args.output, output_rows)
         print(f"Итоговый Excel сохранён: {args.output}")
@@ -155,6 +169,15 @@ def main() -> None:
             manual_wait_seconds=args.wait_seconds,
         )
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "merge-compass":
+        summary = merge_batch_results_with_compass(
+            batch_results_path=args.batch_results,
+            compass_path=args.compass,
+            output_path=args.output,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 
     raise ValueError(f"Неизвестная команда: {args.command}")
