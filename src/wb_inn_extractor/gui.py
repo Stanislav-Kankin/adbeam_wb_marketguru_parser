@@ -247,6 +247,18 @@ class App:
                 return
         self._open_dir(path.parent)
 
+    def _open_enriched_output(self) -> None:
+        path = Path(self.enriched_output_var.get().strip() or "output/final_enriched.xlsx")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                os.startfile(str(path))  # type: ignore[attr-defined]
+                return
+            except AttributeError:
+                subprocess.Popen(["xdg-open", str(path)])
+                return
+        self._open_dir(path.parent)
+
     def _open_dir(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
         try:
@@ -425,9 +437,10 @@ class App:
             compass_path=compass_path,
             output_path=output_path,
         )
+        match_rate = (summary["matched_rows"] / summary["batch_rows"] * 100) if summary["batch_rows"] else 0.0
         self._append_log(
             "Merge Compass: "
-            f"batch_rows={summary['batch_rows']}, matched={summary['matched_rows']}, unmatched={summary['unmatched_rows']}\n"
+            f"batch_rows={summary['batch_rows']}, matched={summary['matched_rows']}, unmatched={summary['unmatched_rows']}, match_rate={match_rate:.1f}%\n"
         )
         self._append_log(
             "Merge Compass: "

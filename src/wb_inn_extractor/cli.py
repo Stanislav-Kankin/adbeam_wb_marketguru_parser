@@ -12,6 +12,7 @@ from .excel_io import (
     read_research_rows_range,
     save_batch_results,
     save_research_sample,
+    summarize_research_rows_by_sheet,
 )
 from .wb_research import BatchInspector, inspect_product_row
 
@@ -75,6 +76,11 @@ def main() -> None:
         save_research_sample(args.output, rows)
         print(f"Создан файл: {args.output}")
         print(f"Строк (уникальных по продавцу+бренду): {len(rows)}")
+        rows_by_sheet = summarize_research_rows_by_sheet(rows)
+        if rows_by_sheet:
+            print("Распределение строк по листам:")
+            for sheet_name, count in rows_by_sheet.items():
+                print(f"  - {sheet_name}: {count}")
         return
 
     if args.command == "inspect-row":
