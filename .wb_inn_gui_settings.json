@@ -1,0 +1,18 @@
+{
+  "input_path": "C:/Users/Пользователь/Downloads/Вігрузка одежка валдбериз 3103.xlsx",
+  "sample_output": "output\\research_sample.xlsx",
+  "artifacts_dir": "output\\artifacts",
+  "profile_dir": "output\\wb_profile",
+  "limit": "",
+  "row": "2",
+  "batch_count": "5",
+  "batch_output": "output\\batch_results.xlsx",
+  "compass_input": "",
+  "enriched_output": "output\\final_enriched.xlsx",
+  "sheet_mode": "selected",
+  "selected_sheets": [
+    "Кросовки"
+  ],
+  "selection_summary": "Последний sample: 269 строк | листов в sample: 1 | стартовая строка = 2",
+  "headful": true
+}

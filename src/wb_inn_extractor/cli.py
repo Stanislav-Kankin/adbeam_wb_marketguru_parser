@@ -8,6 +8,9 @@ from .excel_io import (
     analyze_workbook,
     extract_research_rows,
     merge_batch_results_with_compass,
+    export_batch_no_inn,
+    export_compass_unmatched,
+    export_unique_inn_list,
     read_research_row,
     read_research_rows_range,
     save_batch_results,
@@ -54,6 +57,18 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--profile-dir", type=Path, default=Path("output/wb_profile"))
 
     merge_parser = subparsers.add_parser("merge-compass", help="Склеить batch_results.xlsx с выгрузкой Compass по ИНН")
+
+    export_inn_parser = subparsers.add_parser("export-inn", help="Экспортировать уникальные ИНН из batch_results.xlsx для Compass")
+    export_inn_parser.add_argument("--batch-results", required=True, type=Path)
+    export_inn_parser.add_argument("--output", type=Path, default=Path("output/inn_for_compass.xlsx"))
+
+    no_inn_parser = subparsers.add_parser("export-no-inn", help="Сохранить строки batch_results.xlsx без найденного ИНН")
+    no_inn_parser.add_argument("--batch-results", required=True, type=Path)
+    no_inn_parser.add_argument("--output", type=Path, default=Path("output/batch_no_inn.xlsx"))
+
+    unmatched_parser = subparsers.add_parser("export-unmatched", help="Сохранить строки final_enriched.xlsx без совпадения в Compass")
+    unmatched_parser.add_argument("--final-enriched", required=True, type=Path)
+    unmatched_parser.add_argument("--output", type=Path, default=Path("output/compass_unmatched.xlsx"))
     merge_parser.add_argument("--batch-results", required=True, type=Path)
     merge_parser.add_argument("--compass", required=True, type=Path)
     merge_parser.add_argument("--output", type=Path, default=Path("output/final_enriched.xlsx"))
@@ -185,6 +200,23 @@ def main() -> None:
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
+
+
+    if args.command == "export-inn":
+        summary = export_unique_inn_list(args.batch_results, args.output)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "export-no-inn":
+        summary = export_batch_no_inn(args.batch_results, args.output)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "export-unmatched":
+        summary = export_compass_unmatched(args.final_enriched, args.output)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
 
     raise ValueError(f"Неизвестная команда: {args.command}")
 

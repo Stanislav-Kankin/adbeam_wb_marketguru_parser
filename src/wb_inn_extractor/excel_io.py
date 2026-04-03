@@ -548,3 +548,111 @@ def _is_effectively_empty_row(row: Iterable[Any]) -> bool:
             continue
         return False
     return True
+
+
+
+def export_unique_inn_list(batch_results_path: Path, output_path: Path) -> dict[str, Any]:
+    batch_rows = _read_sheet_as_dicts(batch_results_path)
+    seen: set[str] = set()
+    output_rows: list[dict[str, Any]] = []
+    for row in batch_rows:
+        normalized_inn = _normalize_inn_value(row.get("inn"))
+        if not normalized_inn or normalized_inn in seen:
+            continue
+        seen.add(normalized_inn)
+        output_rows.append({
+            "inn": normalized_inn,
+            "marketguru_seller_name": row.get("marketguru_seller_name") or row.get("seller_name_raw"),
+            "marketguru_brand": row.get("marketguru_brand") or row.get("brand"),
+            "marketguru_product_name": row.get("marketguru_product_name") or row.get("product_name"),
+            "marketguru_source_sheet": row.get("marketguru_source_sheet") or row.get("source_sheet"),
+            "wb_seller_name": row.get("wb_seller_name") or row.get("seller_display_name"),
+            "wb_seller_url": row.get("wb_seller_url") or row.get("seller_url"),
+        })
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_dict_rows_to_excel(output_path, output_rows, preferred_headers=[
+        "inn",
+        "marketguru_seller_name",
+        "marketguru_brand",
+        "marketguru_product_name",
+        "marketguru_source_sheet",
+        "wb_seller_name",
+        "wb_seller_url",
+    ], sheet_name="inn_for_compass")
+    return {
+        "batch_rows": len(batch_rows),
+        "inn_rows": len(output_rows),
+        "output_path": str(output_path),
+    }
+
+
+
+def export_batch_no_inn(batch_results_path: Path, output_path: Path) -> dict[str, Any]:
+    batch_rows = _read_sheet_as_dicts(batch_results_path)
+    output_rows = [row for row in batch_rows if not _normalize_inn_value(row.get("inn"))]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_dict_rows_to_excel(output_path, output_rows, sheet_name="batch_no_inn")
+    return {
+        "batch_rows": len(batch_rows),
+        "no_inn_rows": len(output_rows),
+        "output_path": str(output_path),
+    }
+
+
+
+def export_compass_unmatched(final_enriched_path: Path, output_path: Path) -> dict[str, Any]:
+    enriched_rows = _read_sheet_as_dicts(final_enriched_path)
+    output_rows = [row for row in enriched_rows if not _coerce_to_bool(row.get("compass_match_found"))]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_dict_rows_to_excel(output_path, output_rows, sheet_name="compass_unmatched")
+    return {
+        "final_rows": len(enriched_rows),
+        "unmatched_rows": len(output_rows),
+        "output_path": str(output_path),
+    }
+
+
+
+def _write_dict_rows_to_excel(
+    output_path: Path,
+    rows: list[dict[str, Any]],
+    preferred_headers: list[str] | None = None,
+    sheet_name: str = "Sheet1",
+) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = sheet_name
+
+    headers: list[str] = []
+    if preferred_headers:
+        headers.extend([header for header in preferred_headers if any(header in row for row in rows)])
+
+    seen = set(headers)
+    for row in rows:
+        for header in row.keys():
+            if header not in seen:
+                headers.append(header)
+                seen.add(header)
+
+    if not headers:
+        headers = preferred_headers or ["note"]
+        sheet.append(headers)
+        if headers == ["note"]:
+            sheet.append(["Нет данных для сохранения"])
+    else:
+        sheet.append(headers)
+        for row in rows:
+            sheet.append([row.get(header) for header in headers])
+
+    workbook.save(output_path)
+
+
+
+def _coerce_to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().casefold()
+    return text in {"1", "true", "yes", "да"}

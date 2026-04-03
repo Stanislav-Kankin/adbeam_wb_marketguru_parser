@@ -279,7 +279,7 @@ def _inspect_product_row_on_page(
     html_path = artifacts_dir / f"row_{row_number}.html"
     text_path = artifacts_dir / f"row_{row_number}_text.txt"
 
-    response = page.goto(research_row.wb_candidate_url, wait_until='domcontentloaded', timeout=4_500)
+    response = page.goto(research_row.wb_candidate_url, wait_until='domcontentloaded', timeout=8_500)
     _best_effort_wait(page)
 
     seller_url, seller_response = _go_to_seller_page(page)
@@ -381,7 +381,7 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
             href = locator.get_attribute("href")
             target_url = urljoin(page.url, href) if href else None
             if target_url and "/seller/" in target_url:
-                response = page.goto(target_url, wait_until="domcontentloaded", timeout=4_500)
+                response = page.goto(target_url, wait_until="domcontentloaded", timeout=8_500)
                 _best_effort_wait(page)
                 return target_url, response
 
@@ -768,7 +768,7 @@ def _extract_seller_display_name(text: str) -> str | None:
 def _best_effort_wait(page: Page) -> None:
     for state in ("domcontentloaded", "load", "networkidle"):
         try:
-            page.wait_for_load_state(state, timeout=4_500)
+            page.wait_for_load_state(state, timeout=6_000)
         except Exception:
             continue
     for _ in range(3):
