@@ -128,8 +128,8 @@ class App:
 
         top_grid = ttk.Frame(container)
         top_grid.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
-        top_grid.columnconfigure(0, weight=1)
-        top_grid.columnconfigure(1, weight=1)
+        top_grid.columnconfigure(0, weight=1, uniform="top_halves")
+        top_grid.columnconfigure(1, weight=1, uniform="top_halves")
         top_grid.rowconfigure(0, weight=1)
 
         self._build_sheet_block(top_grid).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
@@ -137,8 +137,8 @@ class App:
 
         mid_grid = ttk.Frame(container)
         mid_grid.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
-        mid_grid.columnconfigure(0, weight=1)
-        mid_grid.columnconfigure(1, weight=1)
+        mid_grid.columnconfigure(0, weight=1, uniform="mid_halves")
+        mid_grid.columnconfigure(1, weight=1, uniform="mid_halves")
         mid_grid.rowconfigure(0, weight=1)
 
         self._build_wb_block(mid_grid).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
@@ -421,6 +421,9 @@ class App:
         summary = settings.get("selection_summary")
         if isinstance(summary, str) and summary:
             self.selection_summary_var.set(summary)
+        sample_summary = settings.get("sample_summary")
+        if isinstance(sample_summary, str) and sample_summary:
+            self.sample_summary_var.set(sample_summary)
 
     def _save_settings(self) -> None:
         try:
@@ -438,6 +441,7 @@ class App:
                 "sheet_mode": self.sheet_mode_var.get(),
                 "selected_sheets": self._get_selected_sheet_names_from_ui() if hasattr(self, "sheet_listbox") else [],
                 "selection_summary": self.selection_summary_var.get(),
+                "sample_summary": self.sample_summary_var.get(),
                 "headful": bool(self.headful_var.get()),
             }
             SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

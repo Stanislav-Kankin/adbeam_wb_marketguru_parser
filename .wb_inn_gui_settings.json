@@ -10,9 +10,8 @@
   "compass_input": "",
   "enriched_output": "output\\final_enriched.xlsx",
   "sheet_mode": "selected",
-  "selected_sheets": [
-    "Кросовки"
-  ],
+  "selected_sheets": [],
   "selection_summary": "Последний sample: 269 строк | листов в sample: 1 | стартовая строка = 2",
+  "sample_summary": "Sample ещё не создавался",
   "headful": true
 }
