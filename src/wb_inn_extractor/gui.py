@@ -9,8 +9,6 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-import sys
-import ctypes
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -31,13 +29,6 @@ from .wb_research import BatchInspector, inspect_product_row
 SETTINGS_PATH = Path(".wb_inn_gui_settings.json")
 
 
-def _resource_path(relative_path: str) -> str:
-    if getattr(sys, "_MEIPASS", None):
-        return str(Path(sys._MEIPASS) / relative_path)
-    return str(Path(__file__).resolve().parents[2] / relative_path)
-
-
-
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -53,6 +44,7 @@ class App:
         self.row_var = tk.StringVar(value="2")
         self.batch_count_var = tk.StringVar(value="5")
         self.batch_output_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
+        self.merge_batch_input_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
         self.compass_input_var = tk.StringVar()
         self.enriched_output_var = tk.StringVar(value=str(Path("output/final_enriched.xlsx")))
         self.headful_var = tk.BooleanVar(value=True)
@@ -288,27 +280,31 @@ class App:
         frame = ttk.LabelFrame(parent, text="5. Склейка с Compass", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, text="Выгрузка Compass", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.compass_input_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
-        ttk.Button(frame, text="Выбрать", command=self._choose_compass_input, style="Secondary.TButton").grid(row=0, column=2, pady=4)
+        ttk.Label(frame, text="Файл batch_results для склейки", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=self.merge_batch_input_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(frame, text="Выбрать", command=self._choose_merge_batch_input, style="Secondary.TButton").grid(row=0, column=2, pady=4)
 
-        ttk.Label(frame, text="Итоговый enriched Excel", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=self.enriched_output_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
-        ttk.Button(frame, text="Выбрать", command=self._choose_enriched_output, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+        ttk.Label(frame, text="Выгрузка Compass", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=self.compass_input_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(frame, text="Выбрать", command=self._choose_compass_input, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+
+        ttk.Label(frame, text="Итоговый enriched Excel", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=self.enriched_output_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(frame, text="Выбрать", command=self._choose_enriched_output, style="Secondary.TButton").grid(row=2, column=2, pady=4)
 
         ttk.Button(
             frame,
             text="Склеить с Compass",
             command=lambda: self._run_in_thread(self._action_merge_compass, task_name="Склейка с Compass"),
             style="Primary.TButton",
-        ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 8))
+        ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 8))
         ttk.Label(
             frame,
-            text="Используй batch_results.xlsx + выгрузку Compass. На выходе получишь final_enriched.xlsx.",
+            text="Можно выбрать любой ранее сохранённый batch_results.xlsx, даже если он лежит в другой папке.",
             style="Muted.TLabel",
             wraplength=450,
             justify="left",
-        ).grid(row=3, column=0, columnspan=3, sticky="w")
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
         return frame
 
     def _build_status_log_block(self, parent):
@@ -373,6 +369,7 @@ class App:
             self.row_var,
             self.batch_count_var,
             self.batch_output_var,
+            self.merge_batch_input_var,
             self.compass_input_var,
             self.enriched_output_var,
             self.sheet_mode_var,
@@ -415,6 +412,7 @@ class App:
             "row": self.row_var,
             "batch_count": self.batch_count_var,
             "batch_output": self.batch_output_var,
+            "merge_batch_input": self.merge_batch_input_var,
             "compass_input": self.compass_input_var,
             "enriched_output": self.enriched_output_var,
             "sheet_mode": self.sheet_mode_var,
@@ -445,6 +443,7 @@ class App:
                 "row": self.row_var.get().strip(),
                 "batch_count": self.batch_count_var.get().strip(),
                 "batch_output": self.batch_output_var.get().strip(),
+                "merge_batch_input": self.merge_batch_input_var.get().strip(),
                 "compass_input": self.compass_input_var.get().strip(),
                 "enriched_output": self.enriched_output_var.get().strip(),
                 "sheet_mode": self.sheet_mode_var.get(),
@@ -515,6 +514,14 @@ class App:
         )
         if path:
             self.batch_output_var.set(path)
+
+    def _choose_merge_batch_input(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Выбери batch_results.xlsx для склейки",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xls")],
+        )
+        if path:
+            self.merge_batch_input_var.set(path)
 
     def _open_artifacts_dir(self) -> None:
         self._open_dir(self.artifacts_dir_var.get())
@@ -756,6 +763,7 @@ class App:
                 self._append_log(f"Batch: строка {row_number} завершена, status={result.parse_status}, inn={result.inn}\n")
 
         save_batch_results(batch_output, output_rows)
+        self.root.after(0, lambda batch_output=batch_output: self.merge_batch_input_var.set(str(batch_output)))
         self._set_batch_progress(done=total, total=max(total, 1), row_number=start_row + total - 1 if total else start_row)
         next_row = start_row + total
         self.root.after(0, lambda next_row=next_row: self.row_var.set(str(next_row)))
@@ -764,7 +772,8 @@ class App:
         self.root.after(0, lambda: messagebox.showinfo("Batch завершён", f"Итоговый Excel сохранён:\n{batch_output}"))
 
     def _action_merge_compass(self) -> None:
-        batch_results_path = Path(self.batch_output_var.get().strip() or "output/batch_results.xlsx")
+        batch_results_value = self.merge_batch_input_var.get().strip() or self.batch_output_var.get().strip() or "output/batch_results.xlsx"
+        batch_results_path = Path(batch_results_value)
         if not batch_results_path.exists():
             raise FileNotFoundError(f"Не найден batch_results.xlsx: {batch_results_path}")
 
@@ -974,18 +983,7 @@ class App:
 
 
 def main() -> None:
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("adbeam.wb.inn.extractor")
-    except Exception:
-        pass
-
     root = tk.Tk()
-
-    try:
-        root.iconbitmap(_resource_path("assets/app.ico"))
-    except Exception:
-        pass
-
     App(root)
     root.mainloop()
 
