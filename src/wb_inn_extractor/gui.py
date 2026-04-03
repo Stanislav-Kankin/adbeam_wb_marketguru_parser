@@ -9,6 +9,8 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+import sys
+import ctypes
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -27,6 +29,13 @@ from .wb_research import BatchInspector, inspect_product_row
 
 
 SETTINGS_PATH = Path(".wb_inn_gui_settings.json")
+
+
+def _resource_path(relative_path: str) -> str:
+    if getattr(sys, "_MEIPASS", None):
+        return str(Path(sys._MEIPASS) / relative_path)
+    return str(Path(__file__).resolve().parents[2] / relative_path)
+
 
 
 class App:
@@ -965,7 +974,18 @@ class App:
 
 
 def main() -> None:
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("adbeam.wb.inn.extractor")
+    except Exception:
+        pass
+
     root = tk.Tk()
+
+    try:
+        root.iconbitmap(_resource_path("assets/app.ico"))
+    except Exception:
+        pass
+
     App(root)
     root.mainloop()
 
