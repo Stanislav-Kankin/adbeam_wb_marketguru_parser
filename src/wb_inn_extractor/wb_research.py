@@ -10,7 +10,16 @@ from playwright.sync_api import BrowserContext, Locator, Page, Response, sync_pl
 
 from .models import InspectResult, ResearchRow
 
-INN_RE = re.compile(r"\b(?:ИНН)\s*[:№]?\s*(\d{10}|\d{12})\b", re.IGNORECASE)
+PRODUCT_GOTO_TIMEOUT_MS = 12_000
+SELLER_GOTO_TIMEOUT_MS = 12_000
+WAIT_FOR_LOAD_STATE_TIMEOUT_MS = 8_000
+MAX_BATCH_ROW_ATTEMPTS = 3
+BASE_TOOLTIP_REVEAL_ROUNDS = 6
+DEEP_TOOLTIP_REVEAL_ROUNDS = 12
+BASE_TOOLTIP_PAUSE_MS = 60
+DEEP_TOOLTIP_PAUSE_MS = 180
+
+INN_RE = re.compile(r"\b(?:ИНН)\s*[:№]?\s*(\d{10}|\d{12}|\d{14})\b", re.IGNORECASE)
 OGRN_RE = re.compile(r"\b(?:ОГРН)\s*[:№]?\s*(\d{13})\b", re.IGNORECASE)
 OGRNIP_RE = re.compile(r"\b(?:ОГРНИП)\s*[:№]?\s*(\d{15})\b", re.IGNORECASE)
 ENTITY_FULL_RE = re.compile(r"(Индивидуальный предприниматель|Общество с ограниченной ответственностью)", re.IGNORECASE)
@@ -33,6 +42,7 @@ TOOLTIP_TEXT_RE = re.compile(
 )
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
+WB_NUMERIC_SELLER_PATH_RE = re.compile(r"^/seller/\d+/?$", re.IGNORECASE)
 
 ANTI_BOT_PATTERNS = [
     "Подозрительная активность",
@@ -68,11 +78,24 @@ TOOLTIP_VISIBLE_SELECTORS = [
     '[class*="tooltip-supplier"]',
 ]
 
+DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS = [
+    '[class*="seller"] [class*="tip"]',
+    '[class*="seller"] [class*="info"]',
+    '[class*="seller"] [class*="tooltip"]',
+    '[class*="seller"] [class*="icon"]',
+    '[class*="rating"] [class*="icon"]',
+    '[class*="rating"] [class*="info"]',
+]
+
+
+class TransientWBError(RuntimeError):
+    pass
+
 
 def _extract_requisites_text_via_dom(page: Page) -> str | None:
     try:
         text = page.evaluate(
-            """
+            r"""
             () => {
               const markers = ['ИНН', 'ОГРН', 'ОГРНИП', 'Номер регистрации', 'КПП'];
               const selectors = [
@@ -170,7 +193,7 @@ class BatchInspector:
             raise RuntimeError('BatchInspector is not started')
 
         last_error: Exception | None = None
-        for attempt in range(2):
+        for attempt in range(MAX_BATCH_ROW_ATTEMPTS):
             try:
                 page = self._ensure_page()
                 result = _inspect_product_row_on_page(
@@ -183,25 +206,24 @@ class BatchInspector:
                 )
 
                 if _is_unexpected_page_url(result.final_url):
-                    self._page = _fresh_batch_page(self._context)
-                    page = self._page
-                    result = _inspect_product_row_on_page(
-                        page=page,
-                        row_number=row_number,
-                        research_row=research_row,
-                        artifacts_dir=self.artifacts_dir,
-                        profile_dir=self.profile_dir,
-                        manual_wait_seconds=0,
-                    )
+                    raise TransientWBError(f'Unexpected page URL after inspect: {result.final_url}')
 
                 if self._page is not None and _is_unexpected_page_url(self._page.url):
                     self._page = _fresh_batch_page(self._context)
                 return result
             except Exception as exc:
                 last_error = exc
-                if attempt == 0 and _should_restart_context(exc):
+                if attempt >= MAX_BATCH_ROW_ATTEMPTS - 1:
+                    raise
+
+                if _should_restart_context(exc):
                     self._restart_context()
                     continue
+
+                if _is_retryable_row_error(exc):
+                    self._page = _fresh_batch_page(self._context)
+                    continue
+
                 raise
 
         if last_error is not None:
@@ -213,10 +235,15 @@ def _is_unexpected_page_url(url: str | None) -> bool:
     if not url or url == 'about:blank':
         return False
     try:
-        host = (urlparse(url).netloc or '').lower()
+        parsed = urlparse(url)
+        host = (parsed.netloc or '').lower()
     except Exception:
         return False
-    return bool(host) and 'wildberries.ru' not in host
+    if bool(host) and 'wildberries.ru' not in host:
+        return True
+    if '/seller/' in (parsed.path or '') and not _is_valid_wb_seller_url(url):
+        return True
+    return False
 
 
 def _fresh_batch_page(context: BrowserContext) -> Page:
@@ -260,7 +287,24 @@ def _should_restart_context(exc: Exception) -> bool:
         'browser has been closed',
         'context has been closed',
     ]
-    return any(marker in message for marker in restart_markers)
+    return isinstance(exc, TransientWBError) or any(marker in message for marker in restart_markers)
+
+
+def _is_retryable_row_error(exc: Exception) -> bool:
+    if isinstance(exc, TransientWBError):
+        return True
+
+    message = str(exc).lower()
+    retry_markers = [
+        'timeout',
+        'navigation',
+        'net::err',
+        'page.goto',
+        'page.content',
+        'page has been closed',
+        'page is navigating',
+    ]
+    return any(marker in message for marker in retry_markers)
 
 
 def _inspect_product_row_on_page(
@@ -279,8 +323,18 @@ def _inspect_product_row_on_page(
     html_path = artifacts_dir / f"row_{row_number}.html"
     text_path = artifacts_dir / f"row_{row_number}_text.txt"
 
-    response = page.goto(research_row.wb_candidate_url, wait_until='domcontentloaded', timeout=8_500)
+    previous_url = page.url
+    response = page.goto(
+        research_row.wb_candidate_url,
+        wait_until='domcontentloaded',
+        timeout=PRODUCT_GOTO_TIMEOUT_MS,
+    )
     _best_effort_wait(page)
+    _ensure_not_stuck_on_previous_seller_page(
+        page=page,
+        research_row=research_row,
+        previous_url=previous_url,
+    )
 
     seller_url, seller_response = _go_to_seller_page(page)
     if seller_response is not None:
@@ -318,6 +372,24 @@ def _inspect_product_row_on_page(
         seller_url=seller_url,
         navigated_to_seller_page=bool(seller_url) or '/seller/' in page.url,
     )
+
+    if _should_run_deep_recovery(result):
+        deep_result = _run_deep_requisites_recovery(
+            page=page,
+            row_number=row_number,
+            research_row=research_row,
+            screenshot_path=screenshot_path,
+            html_path=html_path,
+            text_path=text_path,
+            used_persistent_profile=profile_dir is not None,
+            profile_dir=profile_dir,
+            manual_wait_seconds=manual_wait_seconds,
+            seller_url=seller_url,
+            initial_http_status=response.status if response else None,
+        )
+        if deep_result.inn or (deep_result.entity_type and not result.entity_type):
+            result = deep_result
+
     (artifacts_dir / f"row_{row_number}.json").write_text(
         json.dumps(result.model_dump(mode='json'), ensure_ascii=False, indent=2),
         encoding='utf-8',
@@ -348,6 +420,26 @@ def inspect_product_row(
             context.close()
 
 
+def build_row_error_result(
+    row_number: int,
+    research_row: ResearchRow,
+    error: Exception,
+    profile_dir: Path | None = None,
+) -> InspectResult:
+    return InspectResult(
+        row_number=row_number,
+        url=research_row.wb_candidate_url or "",
+        final_url=None,
+        parse_status="ROW_ERROR",
+        anti_bot_detected=False,
+        used_persistent_profile=profile_dir is not None,
+        profile_dir=str(profile_dir) if profile_dir else None,
+        seller_url=None,
+        navigated_to_seller_page=False,
+        note=f"{type(error).__name__}: {error}",
+    )
+
+
 def _open_context(playwright, headful: bool, profile_dir: Path | None) -> BrowserContext:
     launch_args = [
         "--disable-blink-features=AutomationControlled",
@@ -371,28 +463,43 @@ def _open_context(playwright, headful: bool, profile_dir: Path | None) -> Browse
 
 def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
     if "/seller/" in page.url:
-        return page.url, None
+        raise TransientWBError(f'Page is still on seller URL before seller navigation: {page.url}')
 
     for selector in PRODUCT_SELLER_LINK_SELECTORS:
         try:
-            locator = page.locator(selector).first
-            if locator.count() == 0:
+            locator = page.locator(selector)
+            count = locator.count()
+            if count == 0:
                 continue
-            href = locator.get_attribute("href")
-            target_url = urljoin(page.url, href) if href else None
-            if target_url and "/seller/" in target_url:
-                response = page.goto(target_url, wait_until="domcontentloaded", timeout=8_500)
-                _best_effort_wait(page)
-                return target_url, response
+            for index in range(min(count, 12)):
+                candidate = locator.nth(index)
+                href = candidate.get_attribute("href")
+                target_url = _normalize_candidate_seller_url(page.url, href)
+                if target_url is not None:
+                    response = page.goto(
+                        target_url,
+                        wait_until="domcontentloaded",
+                        timeout=SELLER_GOTO_TIMEOUT_MS,
+                    )
+                    _best_effort_wait(page)
+                    return target_url, response
 
-            try:
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=7_000) as nav:
-                    locator.click(timeout=375)
-                response = nav.value
-                _best_effort_wait(page)
-                return page.url, response
-            except Exception:
-                continue
+                try:
+                    with page.expect_navigation(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS) as nav:
+                        candidate.click(timeout=375)
+                    response = nav.value
+                    navigated_url = page.url
+                    if not _is_valid_wb_seller_url(navigated_url):
+                        try:
+                            page.go_back(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS)
+                            _best_effort_wait(page)
+                        except Exception:
+                            pass
+                        continue
+                    _best_effort_wait(page)
+                    return navigated_url, response
+                except Exception:
+                    continue
         except Exception:
             continue
     return None, None
@@ -401,10 +508,24 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
 
 
 def _reveal_supplier_requisites(page: Page) -> str | None:
+    return _reveal_supplier_requisites_with_strategy(
+        page=page,
+        max_rounds=BASE_TOOLTIP_REVEAL_ROUNDS,
+        pause_ms=BASE_TOOLTIP_PAUSE_MS,
+        deep_mode=False,
+    )
+
+
+def _reveal_supplier_requisites_with_strategy(
+    page: Page,
+    max_rounds: int,
+    pause_ms: int,
+    deep_mode: bool,
+) -> str | None:
     captured_tooltip_text: str | None = None
-    for _ in range(8):
-        _trigger_supplier_tooltip(page)
-        _best_effort_wait(page)
+    for _ in range(max_rounds):
+        _trigger_supplier_tooltip(page, deep_mode=deep_mode)
+        _best_effort_wait(page, include_networkidle=deep_mode, settle_rounds=1 if not deep_mode else 2)
 
         dom_text = _extract_requisites_text_via_dom(page)
         if _contains_requisites_text(dom_text or ""):
@@ -424,14 +545,18 @@ def _reveal_supplier_requisites(page: Page) -> str | None:
             return text
 
         try:
-            page.wait_for_timeout(90)
+            page.wait_for_timeout(pause_ms)
         except Exception:
             break
     return captured_tooltip_text
 
 
-def _trigger_supplier_tooltip(page: Page) -> None:
-    for selector in SELLER_TOOLTIP_TRIGGER_SELECTORS:
+def _trigger_supplier_tooltip(page: Page, deep_mode: bool = False) -> None:
+    selectors = list(SELLER_TOOLTIP_TRIGGER_SELECTORS)
+    if deep_mode:
+        selectors.extend(DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS)
+
+    for selector in selectors:
         try:
             locator = page.locator(selector).first
             if locator.count() == 0:
@@ -765,15 +890,19 @@ def _extract_seller_display_name(text: str) -> str | None:
     return value[:120] if value else None
 
 
-def _best_effort_wait(page: Page) -> None:
-    for state in ("domcontentloaded", "load", "networkidle"):
+def _best_effort_wait(page: Page, include_networkidle: bool = False, settle_rounds: int = 2) -> None:
+    states = ["domcontentloaded", "load"]
+    if include_networkidle:
+        states.append("networkidle")
+
+    for state in states:
         try:
-            page.wait_for_load_state(state, timeout=6_000)
+            page.wait_for_load_state(state, timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS)
         except Exception:
             continue
-    for _ in range(3):
+    for _ in range(settle_rounds):
         try:
-            page.wait_for_timeout(90)
+            page.wait_for_timeout(60)
         except Exception:
             break
 
@@ -826,3 +955,130 @@ def _normalize_text(text: str) -> str:
         if cleaned:
             lines.append(cleaned)
     return "\n".join(lines)
+
+
+def _ensure_not_stuck_on_previous_seller_page(
+    page: Page,
+    research_row: ResearchRow,
+    previous_url: str | None,
+) -> None:
+    current_url = page.url or ""
+    expected_product_marker = f"/catalog/{research_row.wb_nm_id}/" if research_row.wb_nm_id is not None else None
+
+    if expected_product_marker and expected_product_marker in current_url:
+        return
+
+    if "/seller/" not in current_url:
+        return
+
+    if previous_url and previous_url == current_url:
+        raise TransientWBError(
+            f"Navigation stayed on previous seller page instead of product page: {current_url}"
+        )
+
+    raise TransientWBError(
+        f"Expected product page for nmID {research_row.wb_nm_id}, got seller page: {current_url}"
+    )
+
+
+def _normalize_candidate_seller_url(base_url: str, href: str | None) -> str | None:
+    if not href:
+        return None
+    target_url = urljoin(base_url, href)
+    return target_url if _is_valid_wb_seller_url(target_url) else None
+
+
+def _is_valid_wb_seller_url(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    host = (parsed.netloc or '').lower()
+    if host and 'wildberries.ru' not in host:
+        return False
+
+    path = parsed.path or ''
+    return bool(WB_NUMERIC_SELLER_PATH_RE.fullmatch(path))
+
+
+def _should_run_deep_recovery(result: InspectResult) -> bool:
+    return result.parse_status in {"SELLER_PAGE_OPENED", "NEEDS_REVIEW"}
+
+
+def _run_deep_requisites_recovery(
+    page: Page,
+    row_number: int,
+    research_row: ResearchRow,
+    screenshot_path: Path,
+    html_path: Path,
+    text_path: Path,
+    used_persistent_profile: bool,
+    profile_dir: Path | None,
+    manual_wait_seconds: int,
+    seller_url: str | None,
+    initial_http_status: int | None,
+) -> InspectResult:
+    http_status = initial_http_status
+
+    if seller_url:
+        try:
+            response = page.goto(
+                seller_url,
+                wait_until="domcontentloaded",
+                timeout=SELLER_GOTO_TIMEOUT_MS,
+            )
+            http_status = response.status if response else http_status
+            _best_effort_wait(page, include_networkidle=True, settle_rounds=2)
+        except Exception:
+            pass
+
+    captured_tooltip_text = _reveal_supplier_requisites_with_strategy(
+        page=page,
+        max_rounds=DEEP_TOOLTIP_REVEAL_ROUNDS,
+        pause_ms=DEEP_TOOLTIP_PAUSE_MS,
+        deep_mode=True,
+    )
+
+    html = _safe_page_content(page)
+    text = _safe_page_text(page)
+
+    if not _first_match(INN_RE, captured_tooltip_text or "") and not _first_match(INN_RE, html) and not _first_match(INN_RE, text):
+        try:
+            response = page.reload(wait_until="domcontentloaded", timeout=SELLER_GOTO_TIMEOUT_MS)
+            http_status = response.status if response else http_status
+            _best_effort_wait(page, include_networkidle=True, settle_rounds=2)
+            captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites_with_strategy(
+                page=page,
+                max_rounds=DEEP_TOOLTIP_REVEAL_ROUNDS,
+                pause_ms=DEEP_TOOLTIP_PAUSE_MS,
+                deep_mode=True,
+            )
+            html = _safe_page_content(page)
+            text = _safe_page_text(page)
+        except Exception:
+            pass
+
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    html_path.write_text(html, encoding='utf-8')
+    text_path.write_text(text, encoding='utf-8')
+
+    return _build_result(
+        row_number=row_number,
+        url=research_row.wb_candidate_url,
+        page=page,
+        http_status=http_status,
+        html=html,
+        text=text,
+        captured_tooltip_text=captured_tooltip_text,
+        screenshot_path=screenshot_path,
+        html_path=html_path,
+        text_path=text_path,
+        used_persistent_profile=used_persistent_profile,
+        profile_dir=profile_dir,
+        manual_wait_seconds=manual_wait_seconds,
+        seller_url=seller_url,
+        navigated_to_seller_page=bool(seller_url) or '/seller/' in page.url,
+    )

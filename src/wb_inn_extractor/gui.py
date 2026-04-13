@@ -23,7 +23,7 @@ from .excel_io import (
     summarize_research_rows_by_sheet,
 )
 from .models import AnalyzeSummary
-from .wb_research import BatchInspector, inspect_product_row
+from .wb_research import BatchInspector, build_row_error_result, inspect_product_row
 
 
 SETTINGS_PATH = Path(".wb_inn_gui_settings.json")
@@ -722,10 +722,21 @@ class App:
                 self._append_log(
                     f"Batch: обрабатываю строку {row_number}/{start_row + total - 1} | sheet={research_row.source_sheet} | seller={research_row.seller_name_raw}\n"
                 )
-                result = inspector.inspect_row(
-                    row_number=row_number,
-                    research_row=research_row,
-                )
+                try:
+                    result = inspector.inspect_row(
+                        row_number=row_number,
+                        research_row=research_row,
+                    )
+                except Exception as exc:
+                    result = build_row_error_result(
+                        row_number=row_number,
+                        research_row=research_row,
+                        error=exc,
+                        profile_dir=profile_dir,
+                    )
+                    self._append_log(
+                        f"Batch: СЃС‚СЂРѕРєР° {row_number} СѓРїР°Р»Р° РїРѕСЃР»Рµ РїРѕРІС‚РѕСЂРЅС‹С… РїРѕРїС‹С‚РѕРє, РїРёС€Сѓ ROW_ERROR | note={result.note}\n"
+                    )
                 output_rows.append({
                     "row_number": row_number,
                     "source_sheet": research_row.source_sheet,

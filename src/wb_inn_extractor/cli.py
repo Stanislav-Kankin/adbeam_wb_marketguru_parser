@@ -17,7 +17,7 @@ from .excel_io import (
     save_research_sample,
     summarize_research_rows_by_sheet,
 )
-from .wb_research import BatchInspector, inspect_product_row
+from .wb_research import BatchInspector, build_row_error_result, inspect_product_row
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -129,10 +129,18 @@ def main() -> None:
         with BatchInspector(artifacts_dir=args.artifacts_dir, headful=True, profile_dir=args.profile_dir) as inspector:
             for offset, research_row in enumerate(research_rows, start=0):
                 row_number = args.start_row + offset
-                result = inspector.inspect_row(
-                    row_number=row_number,
-                    research_row=research_row,
-                )
+                try:
+                    result = inspector.inspect_row(
+                        row_number=row_number,
+                        research_row=research_row,
+                    )
+                except Exception as exc:
+                    result = build_row_error_result(
+                        row_number=row_number,
+                        research_row=research_row,
+                        error=exc,
+                        profile_dir=args.profile_dir,
+                    )
                 output_rows.append({
                     "row_number": row_number,
                     "source_sheet": research_row.source_sheet,
