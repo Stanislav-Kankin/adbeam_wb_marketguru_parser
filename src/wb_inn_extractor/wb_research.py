@@ -18,6 +18,8 @@ BASE_TOOLTIP_REVEAL_ROUNDS = 6
 DEEP_TOOLTIP_REVEAL_ROUNDS = 12
 BASE_TOOLTIP_PAUSE_MS = 60
 DEEP_TOOLTIP_PAUSE_MS = 180
+SELLER_LINK_DISCOVERY_ROUNDS = 8
+SELLER_LINK_DISCOVERY_PAUSE_MS = 180
 
 INN_RE = re.compile(r"\b(?:ИНН)\s*[:№]?\s*(\d{10}|\d{12}|\d{14})\b", re.IGNORECASE)
 OGRN_RE = re.compile(r"\b(?:ОГРН)\s*[:№]?\s*(\d{13})\b", re.IGNORECASE)
@@ -43,6 +45,16 @@ TOOLTIP_TEXT_RE = re.compile(
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 WB_NUMERIC_SELLER_PATH_RE = re.compile(r"^/seller/\d+/?$", re.IGNORECASE)
+
+IGNORED_SELLER_DISPLAY_NAMES = {
+    "все товары",
+    "главная",
+    "адреса",
+    "корзина",
+    "франкфурт",
+    "wildberries",
+    "wibes",
+}
 
 ANTI_BOT_PATTERNS = [
     "Подозрительная активность",
@@ -339,6 +351,8 @@ def _inspect_product_row_on_page(
     seller_url, seller_response = _go_to_seller_page(page)
     if seller_response is not None:
         response = seller_response
+    if seller_url is None and _is_valid_wb_seller_url(page.url):
+        seller_url = page.url
 
     captured_tooltip_text = _reveal_supplier_requisites(page)
 
@@ -465,6 +479,19 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
     if "/seller/" in page.url:
         raise TransientWBError(f'Page is still on seller URL before seller navigation: {page.url}')
 
+    discovered_seller_url = _wait_for_seller_link_or_page(page)
+    if discovered_seller_url is not None:
+        try:
+            response = page.goto(
+                discovered_seller_url,
+                wait_until="domcontentloaded",
+                timeout=SELLER_GOTO_TIMEOUT_MS,
+            )
+            _best_effort_wait(page, settle_rounds=2)
+            return discovered_seller_url, response
+        except Exception:
+            pass
+
     for selector in PRODUCT_SELLER_LINK_SELECTORS:
         try:
             locator = page.locator(selector)
@@ -481,23 +508,40 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
                         wait_until="domcontentloaded",
                         timeout=SELLER_GOTO_TIMEOUT_MS,
                     )
-                    _best_effort_wait(page)
+                    _best_effort_wait(page, settle_rounds=2)
                     return target_url, response
 
                 try:
-                    with page.expect_navigation(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS) as nav:
-                        candidate.click(timeout=375)
-                    response = nav.value
-                    navigated_url = page.url
-                    if not _is_valid_wb_seller_url(navigated_url):
+                    before_url = page.url
+                    response = None
+                    try:
+                        with page.expect_navigation(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS) as nav:
+                            candidate.click(timeout=600)
+                        response = nav.value
+                    except Exception:
+                        try:
+                            candidate.click(timeout=600)
+                        except Exception:
+                            continue
+
+                    navigated_url = _wait_for_seller_link_or_page(page, previous_url=before_url)
+                    if navigated_url is None:
                         try:
                             page.go_back(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS)
-                            _best_effort_wait(page)
+                            _best_effort_wait(page, settle_rounds=2)
                         except Exception:
                             pass
                         continue
-                    _best_effort_wait(page)
-                    return navigated_url, response
+
+                    if _is_valid_wb_seller_url(navigated_url):
+                        _best_effort_wait(page, settle_rounds=2)
+                        return navigated_url, response
+
+                    try:
+                        page.go_back(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS)
+                        _best_effort_wait(page, settle_rounds=2)
+                    except Exception:
+                        pass
                 except Exception:
                     continue
         except Exception:
@@ -688,7 +732,7 @@ def _build_result(
     seller_display_name = _first_non_empty(
         _extract_seller_display_name_from_html(html),
         _extract_seller_display_name(tooltip_text or ""),
-        _extract_seller_display_name(text),
+        _extract_seller_display_name(text) if navigated_to_seller_page else None,
     )
 
     combined_text = "\n".join(filter(None, [page_title or "", text, tooltip_text or "", inn or "", ogrn or "", ogrnip or "", entity_type or "", seller_display_name or ""]))
@@ -746,7 +790,7 @@ def _extract_seller_display_name_from_html(html: str) -> str | None:
     for match in SELLER_HEADER_RE.finditer(html):
         raw = TAG_RE.sub(' ', match.group('name'))
         normalized = _normalize_text(raw)
-        if normalized and 'Wildberries' not in normalized:
+        if normalized and 'Wildberries' not in normalized and _is_plausible_seller_display_name(normalized):
             return normalized[:120]
     return None
 
@@ -880,14 +924,14 @@ def _extract_seller_display_name(text: str) -> str | None:
         if any(marker in line for marker in ["ИНН", "ОГРН", "ОГРНИП", "КПП", "Номер регистрации", "Интернет-магазин Wildberries"]):
             continue
         cleaned = re.sub(r"\b(ИП|ООО)\b\s*$", "", line).strip(" ,")
-        if len(cleaned) >= 2:
+        if _is_plausible_seller_display_name(cleaned):
             return cleaned[:120]
 
     match = SELLER_NAME_RE.search(text)
     if not match:
         return None
     value = " ".join(match.group(1).split())
-    return value[:120] if value else None
+    return value[:120] if _is_plausible_seller_display_name(value) else None
 
 
 def _best_effort_wait(page: Page, include_networkidle: bool = False, settle_rounds: int = 2) -> None:
@@ -988,6 +1032,45 @@ def _normalize_candidate_seller_url(base_url: str, href: str | None) -> str | No
     return target_url if _is_valid_wb_seller_url(target_url) else None
 
 
+def _wait_for_seller_link_or_page(page: Page, previous_url: str | None = None) -> str | None:
+    for _ in range(SELLER_LINK_DISCOVERY_ROUNDS):
+        current_url = page.url or ""
+        if _is_valid_wb_seller_url(current_url):
+            return current_url
+
+        discovered_url = _discover_numeric_seller_url_on_page(page)
+        if discovered_url is not None:
+            return discovered_url
+
+        if previous_url and current_url and current_url != previous_url and '/seller/' in current_url:
+            return current_url
+
+        try:
+            page.wait_for_timeout(SELLER_LINK_DISCOVERY_PAUSE_MS)
+        except Exception:
+            break
+    return None
+
+
+def _discover_numeric_seller_url_on_page(page: Page) -> str | None:
+    for selector in PRODUCT_SELLER_LINK_SELECTORS:
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+        except Exception:
+            continue
+
+        for index in range(min(count, 12)):
+            try:
+                href = locator.nth(index).get_attribute("href")
+            except Exception:
+                continue
+            target_url = _normalize_candidate_seller_url(page.url, href)
+            if target_url is not None:
+                return target_url
+    return None
+
+
 def _is_valid_wb_seller_url(url: str | None) -> bool:
     if not url:
         return False
@@ -1004,8 +1087,31 @@ def _is_valid_wb_seller_url(url: str | None) -> bool:
     return bool(WB_NUMERIC_SELLER_PATH_RE.fullmatch(path))
 
 
+def _is_plausible_seller_display_name(value: str | None) -> bool:
+    if not value:
+        return False
+
+    normalized = _normalize_text(value).strip(" ,")
+    if len(normalized) < 2:
+        return False
+
+    if normalized.lower() in IGNORED_SELLER_DISPLAY_NAMES:
+        return False
+
+    if re.fullmatch(r"\d+[.,]\d+", normalized):
+        return False
+
+    if re.fullmatch(r"[\d\s.,%?]+", normalized):
+        return False
+
+    if not re.search(r"[A-Za-zА-Яа-яЁё]", normalized):
+        return False
+
+    return True
+
+
 def _should_run_deep_recovery(result: InspectResult) -> bool:
-    return result.parse_status in {"SELLER_PAGE_OPENED", "NEEDS_REVIEW"}
+    return result.parse_status in {"SELLER_PAGE_OPENED", "PAGE_OPENED_NO_REQUISITES", "NEEDS_REVIEW"}
 
 
 def _run_deep_requisites_recovery(
@@ -1022,6 +1128,14 @@ def _run_deep_requisites_recovery(
     initial_http_status: int | None,
 ) -> InspectResult:
     http_status = initial_http_status
+
+    if seller_url is None and not _is_valid_wb_seller_url(page.url):
+        discovered_seller_url, response = _go_to_seller_page(page)
+        if discovered_seller_url is not None:
+            seller_url = discovered_seller_url
+            http_status = response.status if response else http_status
+    elif seller_url is None and _is_valid_wb_seller_url(page.url):
+        seller_url = page.url
 
     if seller_url:
         try:

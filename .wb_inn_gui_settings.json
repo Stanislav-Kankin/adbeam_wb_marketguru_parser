@@ -4,7 +4,7 @@
   "artifacts_dir": "output\\artifacts",
   "profile_dir": "output\\wb_profile",
   "limit": "",
-  "row": "2",
+  "row": "247",
   "batch_count": "245",
   "batch_output": "output\\batch_results.xlsx",
   "merge_batch_input": "output\\batch_results.xlsx",
