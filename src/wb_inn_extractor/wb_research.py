@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -356,7 +356,6 @@ def _inspect_product_row_on_page(
         seller_url = page.url
 
     captured_tooltip_text = _reveal_supplier_requisites(page)
-
     if manual_wait_seconds > 0:
         time.sleep(manual_wait_seconds)
         captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites(page)
@@ -568,7 +567,17 @@ def _reveal_supplier_requisites_with_strategy(
     pause_ms: int,
     deep_mode: bool,
 ) -> str | None:
-    captured_tooltip_text: str | None = None
+    dom_text = _extract_requisites_text_via_dom(page)
+    if _contains_requisites_text(dom_text or ""):
+        return dom_text
+
+    captured_tooltip_text = _extract_tooltip_text_from_page(page)
+    if _contains_requisites_text(captured_tooltip_text or ""):
+        return captured_tooltip_text
+
+    if not _page_has_requisites_entrypoints(page, deep_mode=deep_mode):
+        return captured_tooltip_text
+
     for _ in range(max_rounds):
         _trigger_supplier_tooltip(page, deep_mode=deep_mode)
         _best_effort_wait(page, include_networkidle=deep_mode, settle_rounds=1 if not deep_mode else 2)
@@ -689,6 +698,21 @@ def _tooltip_visible(page: Page) -> bool:
     return False
 
 
+def _page_has_requisites_entrypoints(page: Page, deep_mode: bool) -> bool:
+    selectors = list(SELLER_TOOLTIP_TRIGGER_SELECTORS)
+    if deep_mode:
+        selectors.extend(DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS)
+    selectors.extend(TOOLTIP_VISIBLE_SELECTORS)
+
+    for selector in selectors:
+        try:
+            if page.locator(selector).first.count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _build_result(
     row_number: int,
     url: str,
@@ -708,6 +732,7 @@ def _build_result(
 ) -> InspectResult:
     page_title = _safe_page_title(page)
     tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html)
+    page_has_requisites_entrypoints = _page_has_requisites_entrypoints(page, deep_mode=True)
 
     inn = _first_non_empty(
         _first_match(INN_RE, tooltip_text or ""),
@@ -747,6 +772,7 @@ def _build_result(
         entity_type=entity_type,
         manual_wait_seconds=manual_wait_seconds,
         navigated_to_seller_page=navigated_to_seller_page,
+        page_has_requisites_entrypoints=page_has_requisites_entrypoints,
     )
 
     return InspectResult(
@@ -804,6 +830,7 @@ def _detect_parse_status(
     entity_type: str | None,
     manual_wait_seconds: int,
     navigated_to_seller_page: bool,
+    page_has_requisites_entrypoints: bool,
 ) -> tuple[str, str]:
     requisites_found = bool(inn or entity_type)
 
@@ -827,8 +854,11 @@ def _detect_parse_status(
     if entity_type:
         return "NEEDS_REVIEW", "Есть признаки реквизитов продавца, но ИНН не найден"
 
-    if navigated_to_seller_page:
+    if navigated_to_seller_page and page_has_requisites_entrypoints:
         return "SELLER_PAGE_OPENED", "Перешли на страницу продавца, но реквизиты не извлеклись"
+
+    if navigated_to_seller_page and not page_has_requisites_entrypoints:
+        return "Нет реквизитов на странице", "Нет реквизитов на странице"
 
     if manual_wait_seconds > 0:
         return "PRODUCT_PAGE_OPENED", "Карточка открылась после ручной сессии, но реквизиты пока не извлечены"
@@ -1225,3 +1255,5 @@ def _run_deep_requisites_recovery(
         seller_url=seller_url,
         navigated_to_seller_page=bool(seller_url) or '/seller/' in page.url,
     )
+
+
