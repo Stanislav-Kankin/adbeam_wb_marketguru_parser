@@ -16,5 +16,5 @@
   ],
   "selection_summary": "Последний sample: 245 строк | листов в sample: 1 | стартовая строка = 2",
   "sample_summary": "Последний sample: 245 строк\nЛистов в sample: 1\nРекомендуемая стартовая строка для batch: 2",
-  "headful": true
+  "headful": false
 }

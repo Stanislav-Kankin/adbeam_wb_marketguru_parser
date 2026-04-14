@@ -45,6 +45,7 @@ TOOLTIP_TEXT_RE = re.compile(
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 WB_NUMERIC_SELLER_PATH_RE = re.compile(r"^/seller/\d+/?$", re.IGNORECASE)
+WB_GENERIC_SELLER_PATH_RE = re.compile(r"^/seller/[^/?#]+/?$", re.IGNORECASE)
 
 IGNORED_SELLER_DISPLAY_NAMES = {
     "все товары",
@@ -253,7 +254,7 @@ def _is_unexpected_page_url(url: str | None) -> bool:
         return False
     if bool(host) and 'wildberries.ru' not in host:
         return True
-    if '/seller/' in (parsed.path or '') and not _is_valid_wb_seller_url(url):
+    if '/seller/' in (parsed.path or '') and not _is_supported_wb_seller_url(url):
         return True
     return False
 
@@ -351,7 +352,7 @@ def _inspect_product_row_on_page(
     seller_url, seller_response = _go_to_seller_page(page)
     if seller_response is not None:
         response = seller_response
-    if seller_url is None and _is_valid_wb_seller_url(page.url):
+    if seller_url is None and _is_supported_wb_seller_url(page.url):
         seller_url = page.url
 
     captured_tooltip_text = _reveal_supplier_requisites(page)
@@ -479,7 +480,7 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
     if "/seller/" in page.url:
         raise TransientWBError(f'Page is still on seller URL before seller navigation: {page.url}')
 
-    discovered_seller_url = _wait_for_seller_link_or_page(page)
+    discovered_seller_url = _wait_for_seller_link_or_page(page, allow_slug=True)
     if discovered_seller_url is not None:
         try:
             response = page.goto(
@@ -498,10 +499,11 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
             count = locator.count()
             if count == 0:
                 continue
+            allow_slug = _selector_allows_slug_seller_url(selector)
             for index in range(min(count, 12)):
                 candidate = locator.nth(index)
                 href = candidate.get_attribute("href")
-                target_url = _normalize_candidate_seller_url(page.url, href)
+                target_url = _normalize_candidate_seller_url(page.url, href, allow_slug=allow_slug)
                 if target_url is not None:
                     response = page.goto(
                         target_url,
@@ -524,7 +526,7 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
                         except Exception:
                             continue
 
-                    navigated_url = _wait_for_seller_link_or_page(page, previous_url=before_url)
+                    navigated_url = _wait_for_seller_link_or_page(page, previous_url=before_url, allow_slug=allow_slug)
                     if navigated_url is None:
                         try:
                             page.go_back(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS)
@@ -533,7 +535,7 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
                             pass
                         continue
 
-                    if _is_valid_wb_seller_url(navigated_url):
+                    if _is_valid_wb_seller_url(navigated_url) or (allow_slug and _is_supported_wb_seller_url(navigated_url)):
                         _best_effort_wait(page, settle_rounds=2)
                         return navigated_url, response
 
@@ -1025,24 +1027,30 @@ def _ensure_not_stuck_on_previous_seller_page(
     )
 
 
-def _normalize_candidate_seller_url(base_url: str, href: str | None) -> str | None:
+def _normalize_candidate_seller_url(base_url: str, href: str | None, allow_slug: bool = False) -> str | None:
     if not href:
         return None
     target_url = urljoin(base_url, href)
-    return target_url if _is_valid_wb_seller_url(target_url) else None
+    if _is_valid_wb_seller_url(target_url):
+        return target_url
+    if allow_slug and _is_supported_wb_seller_url(target_url):
+        return target_url
+    return None
 
 
-def _wait_for_seller_link_or_page(page: Page, previous_url: str | None = None) -> str | None:
+def _wait_for_seller_link_or_page(page: Page, previous_url: str | None = None, allow_slug: bool = False) -> str | None:
     for _ in range(SELLER_LINK_DISCOVERY_ROUNDS):
         current_url = page.url or ""
-        if _is_valid_wb_seller_url(current_url):
+        if _is_valid_wb_seller_url(current_url) or (allow_slug and _is_supported_wb_seller_url(current_url)):
             return current_url
 
-        discovered_url = _discover_numeric_seller_url_on_page(page)
+        discovered_url = _discover_seller_url_on_page(page, allow_slug=allow_slug)
         if discovered_url is not None:
             return discovered_url
 
-        if previous_url and current_url and current_url != previous_url and '/seller/' in current_url:
+        if previous_url and current_url and current_url != previous_url and (
+            _is_valid_wb_seller_url(current_url) or (allow_slug and _is_supported_wb_seller_url(current_url))
+        ):
             return current_url
 
         try:
@@ -1052,8 +1060,9 @@ def _wait_for_seller_link_or_page(page: Page, previous_url: str | None = None) -
     return None
 
 
-def _discover_numeric_seller_url_on_page(page: Page) -> str | None:
+def _discover_seller_url_on_page(page: Page, allow_slug: bool = False) -> str | None:
     for selector in PRODUCT_SELLER_LINK_SELECTORS:
+        allow_slug_for_selector = allow_slug and _selector_allows_slug_seller_url(selector)
         try:
             locator = page.locator(selector)
             count = locator.count()
@@ -1065,10 +1074,30 @@ def _discover_numeric_seller_url_on_page(page: Page) -> str | None:
                 href = locator.nth(index).get_attribute("href")
             except Exception:
                 continue
-            target_url = _normalize_candidate_seller_url(page.url, href)
+            target_url = _normalize_candidate_seller_url(page.url, href, allow_slug=allow_slug_for_selector)
             if target_url is not None:
                 return target_url
     return None
+
+
+def _selector_allows_slug_seller_url(selector: str) -> bool:
+    return selector == PRODUCT_SELLER_LINK_SELECTORS[0]
+
+
+def _is_supported_wb_seller_url(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    host = (parsed.netloc or '').lower()
+    if host and 'wildberries.ru' not in host:
+        return False
+
+    path = parsed.path or ''
+    return bool(WB_GENERIC_SELLER_PATH_RE.fullmatch(path))
 
 
 def _is_valid_wb_seller_url(url: str | None) -> bool:
@@ -1129,12 +1158,12 @@ def _run_deep_requisites_recovery(
 ) -> InspectResult:
     http_status = initial_http_status
 
-    if seller_url is None and not _is_valid_wb_seller_url(page.url):
+    if seller_url is None and not _is_supported_wb_seller_url(page.url):
         discovered_seller_url, response = _go_to_seller_page(page)
         if discovered_seller_url is not None:
             seller_url = discovered_seller_url
             http_status = response.status if response else http_status
-    elif seller_url is None and _is_valid_wb_seller_url(page.url):
+    elif seller_url is None and _is_supported_wb_seller_url(page.url):
         seller_url = page.url
 
     if seller_url:
