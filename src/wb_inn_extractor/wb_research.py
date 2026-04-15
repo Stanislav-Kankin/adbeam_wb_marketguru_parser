@@ -24,6 +24,8 @@ SELLER_LINK_DISCOVERY_PAUSE_MS = 180
 INN_RE = re.compile(r"\b(?:ИНН)\s*[:№]?\s*(\d{10}|\d{12}|\d{14})\b", re.IGNORECASE)
 OGRN_RE = re.compile(r"\b(?:ОГРН)\s*[:№]?\s*(\d{13})\b", re.IGNORECASE)
 OGRNIP_RE = re.compile(r"\b(?:ОГРНИП)\s*[:№]?\s*(\d{15})\b", re.IGNORECASE)
+BELARUS_RE = re.compile(r"\b(?:Республика\s+Беларусь|Беларусь|УНП)\b", re.IGNORECASE)
+KAZAKHSTAN_RE = re.compile(r"\b(?:Республика\s+Казахстан|Казахстан|БИН|ИИН)\b", re.IGNORECASE)
 ENTITY_FULL_RE = re.compile(r"(Индивидуальный предприниматель|Общество с ограниченной ответственностью)", re.IGNORECASE)
 ENTITY_SHORT_RE = re.compile(r"\b(ИП|ООО)\b")
 SELLER_NAME_RE = re.compile(
@@ -97,19 +99,22 @@ class TransientWBError(RuntimeError):
     pass
 
 
-def _extract_requisites_text_via_dom(page: Page) -> str | None:
+def _extract_requisites_text_via_dom(page: Page, include_body_scan: bool = False) -> str | None:
     try:
         text = page.evaluate(
             r"""
-            () => {
-              const markers = ['ИНН', 'ОГРН', 'ОГРНИП', 'Номер регистрации', 'КПП'];
+            (includeBodyScan) => {
+              const markers = ['ИНН', 'ОГРН', 'ОГРНИП', 'Номер регистрации', 'КПП', 'УНП', 'БИН', 'ИИН', 'Республика Беларусь', 'Казахстан', 'Индивидуальный предприниматель', 'Общество с ограниченной ответственностью'];
               const selectors = [
                 '.tooltip.tooltip-supplier',
                 '[class*="tooltip-supplier"]',
                 '.tooltip__content',
                 '.seller-details',
-                'body',
               ];
+
+              if (includeBodyScan) {
+                selectors.push('body');
+              }
 
               const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
               const candidates = [];
@@ -124,21 +129,24 @@ def _extract_requisites_text_via_dom(page: Page) -> str | None:
                 }
               }
 
-              const allNodes = Array.from(document.querySelectorAll('body *'));
-              for (const node of allNodes.reverse()) {
-                const raw = normalize(node.innerText || node.textContent || '');
-                if (!raw || raw.length < 15) {
-                  continue;
-                }
-                if (markers.some((marker) => raw.includes(marker))) {
-                  candidates.push(raw);
-                  break;
+              if (includeBodyScan) {
+                const allNodes = Array.from(document.querySelectorAll('body *'));
+                for (const node of allNodes.reverse()) {
+                  const raw = normalize(node.innerText || node.textContent || '');
+                  if (!raw || raw.length < 15) {
+                    continue;
+                  }
+                  if (markers.some((marker) => raw.includes(marker))) {
+                    candidates.push(raw);
+                    break;
+                  }
                 }
               }
 
               return candidates[0] || null;
             }
-            """
+            """,
+            include_body_scan,
         )
     except Exception:
         return None
@@ -354,6 +362,8 @@ def _inspect_product_row_on_page(
         time.sleep(manual_wait_seconds)
         captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites(page)
 
+    navigated_to_seller_page = bool(seller_url) or '/seller/' in page.url
+
     if fast_success_exit:
         fast_result = _build_result(
             row_number=row_number,
@@ -370,7 +380,7 @@ def _inspect_product_row_on_page(
             profile_dir=profile_dir,
             manual_wait_seconds=manual_wait_seconds,
             seller_url=seller_url,
-            navigated_to_seller_page=bool(seller_url) or '/seller/' in page.url,
+            navigated_to_seller_page=navigated_to_seller_page,
         )
         if not fast_result.seller_display_name and research_row.seller_name_raw:
             fast_result.seller_display_name = research_row.seller_name_raw
@@ -402,7 +412,7 @@ def _inspect_product_row_on_page(
         profile_dir=profile_dir,
         manual_wait_seconds=manual_wait_seconds,
         seller_url=seller_url,
-        navigated_to_seller_page=bool(seller_url) or '/seller/' in page.url,
+        navigated_to_seller_page=navigated_to_seller_page,
     )
 
     if _should_run_deep_recovery(result):
@@ -419,7 +429,7 @@ def _inspect_product_row_on_page(
             seller_url=seller_url,
             initial_http_status=response.status if response else None,
         )
-        if deep_result.inn or (deep_result.entity_type and not result.entity_type):
+        if _result_information_score(deep_result) > _result_information_score(result):
             result = deep_result
 
     _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=result)
@@ -583,12 +593,12 @@ def _reveal_supplier_requisites_with_strategy(
     pause_ms: int,
     deep_mode: bool,
 ) -> str | None:
-    dom_text = _extract_requisites_text_via_dom(page)
-    if _contains_requisites_text(dom_text or ""):
+    dom_text = _extract_requisites_text_via_dom(page, include_body_scan=deep_mode)
+    if _contains_seller_signal(dom_text or ""):
         return dom_text
 
     captured_tooltip_text = _extract_tooltip_text_from_page(page)
-    if _contains_requisites_text(captured_tooltip_text or ""):
+    if _contains_seller_signal(captured_tooltip_text or ""):
         return captured_tooltip_text
 
     if not _page_has_requisites_entrypoints(page, deep_mode=deep_mode):
@@ -598,21 +608,21 @@ def _reveal_supplier_requisites_with_strategy(
         _trigger_supplier_tooltip(page, deep_mode=deep_mode)
         _best_effort_wait(page, include_networkidle=deep_mode, settle_rounds=1 if not deep_mode else 2)
 
-        dom_text = _extract_requisites_text_via_dom(page)
-        if _contains_requisites_text(dom_text or ""):
+        dom_text = _extract_requisites_text_via_dom(page, include_body_scan=deep_mode)
+        if _contains_seller_signal(dom_text or ""):
             return dom_text
 
         captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page)
-        if _contains_requisites_text(captured_tooltip_text or ""):
+        if _contains_seller_signal(captured_tooltip_text or ""):
             return captured_tooltip_text
 
         html = _safe_page_content(page)
         html_tooltip = _extract_tooltip_text_from_html(html)
-        if _contains_requisites_text(html_tooltip or ""):
+        if _contains_seller_signal(html_tooltip or ""):
             return html_tooltip
 
         text = _safe_page_text(page)
-        if _contains_requisites_text(text):
+        if _contains_seller_signal(text):
             return text
 
         try:
@@ -628,22 +638,31 @@ def _trigger_supplier_tooltip(page: Page, deep_mode: bool = False) -> None:
         selectors.extend(DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS)
 
     for selector in selectors:
-        try:
-            locator = page.locator(selector).first
-            if locator.count() == 0:
-                continue
-            locator.scroll_into_view_if_needed(timeout=375)
-            _hover_like_human(page, locator)
-            try:
-                locator.click(timeout=375, force=True)
-            except Exception:
-                pass
-            _dispatch_tooltip_events(page, locator)
-            _force_tooltip_open_via_js(page, selector)
-            if _tooltip_visible(page) or _contains_requisites_text(_extract_requisites_text_via_dom(page) or ""):
-                return
-        except Exception:
+        candidates = _selector_candidates(page, selector)
+        if not candidates:
             continue
+        for locator in candidates:
+            try:
+                locator.scroll_into_view_if_needed(timeout=375)
+                _hover_like_human(page, locator)
+                try:
+                    locator.focus(timeout=250)
+                except Exception:
+                    pass
+                try:
+                    locator.click(timeout=375, force=True)
+                except Exception:
+                    pass
+                _dispatch_tooltip_events(page, locator)
+                try:
+                    locator.press("Enter", timeout=250)
+                except Exception:
+                    pass
+                _force_tooltip_open_via_js(page, selector)
+                if _tooltip_visible(page) or _contains_seller_signal(_extract_requisites_text_via_dom(page, include_body_scan=False) or ""):
+                    return
+            except Exception:
+                continue
 
 
 def _force_tooltip_open_via_js(page: Page, selector: str) -> None:
@@ -651,11 +670,13 @@ def _force_tooltip_open_via_js(page: Page, selector: str) -> None:
         page.evaluate(
             """
             (selector) => {
-              const node = document.querySelector(selector);
-              if (!node) return;
+              const nodes = Array.from(document.querySelectorAll(selector));
+              if (!nodes.length) return;
               const events = ['mouseenter', 'mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'];
-              for (const eventName of events) {
-                node.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, composed: true, view: window }));
+              for (const node of nodes) {
+                for (const eventName of events) {
+                  node.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, composed: true, view: window }));
+                }
               }
             }
             """,
@@ -721,14 +742,12 @@ def _page_has_requisites_entrypoints(page: Page, deep_mode: bool) -> bool:
     selectors.extend(TOOLTIP_VISIBLE_SELECTORS)
 
     for selector in selectors:
-        try:
-            locator = page.locator(selector).first
-            if locator.count() == 0:
+        for locator in _selector_candidates(page, selector):
+            try:
+                if locator.is_visible(timeout=250):
+                    return True
+            except Exception:
                 continue
-            if locator.is_visible(timeout=250):
-                return True
-        except Exception:
-            continue
     return False
 
 
@@ -751,7 +770,8 @@ def _build_result(
 ) -> InspectResult:
     page_title = _safe_page_title(page)
     tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html)
-    page_has_requisites_entrypoints = _page_has_requisites_entrypoints(page, deep_mode=True)
+    page_has_requisites_entrypoints = _page_has_requisites_entrypoints(page, deep_mode=False)
+    seller_country = _detect_seller_country(tooltip_text or "", html, text)
 
     inn = _first_non_empty(
         _first_match(INN_RE, tooltip_text or ""),
@@ -789,6 +809,7 @@ def _build_result(
         anti_bot_detected=anti_bot_detected,
         inn=inn,
         entity_type=entity_type,
+        seller_country=seller_country,
         manual_wait_seconds=manual_wait_seconds,
         navigated_to_seller_page=navigated_to_seller_page,
         page_has_requisites_entrypoints=page_has_requisites_entrypoints,
@@ -847,6 +868,7 @@ def _detect_parse_status(
     anti_bot_detected: bool,
     inn: str | None,
     entity_type: str | None,
+    seller_country: str | None,
     manual_wait_seconds: int,
     navigated_to_seller_page: bool,
     page_has_requisites_entrypoints: bool,
@@ -870,6 +892,9 @@ def _detect_parse_status(
     if inn:
         return "SUCCESS", "ИНН найден на странице продавца" if navigated_to_seller_page else "ИНН найден в тексте страницы"
 
+    if seller_country:
+        return seller_country, f"Обнаружен продавец из страны: {seller_country}"
+
     if entity_type:
         return "NEEDS_REVIEW", "Есть признаки реквизитов продавца, но ИНН не найден"
 
@@ -891,6 +916,21 @@ def _contains_requisites_text(text: str) -> bool:
     return any(marker in text for marker in ('ИНН', 'ОГРН', 'ОГРНИП', 'Номер регистрации', 'КПП'))
 
 
+def _contains_seller_signal(text: str) -> bool:
+    return bool(_contains_requisites_text(text) or _detect_seller_country(text) or _extract_entity_type(text))
+
+
+def _detect_seller_country(*texts: str) -> str | None:
+    combined_text = _normalize_text("\n".join(filter(None, texts)))
+    if not combined_text:
+        return None
+    if BELARUS_RE.search(combined_text):
+        return "БЕЛОРУСЬ"
+    if KAZAKHSTAN_RE.search(combined_text):
+        return "КАЗАХСТАН"
+    return None
+
+
 def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
     text_lower = text.lower()
     if http_status == 498:
@@ -899,25 +939,26 @@ def _contains_anti_bot_text(text: str, http_status: int | None) -> bool:
 
 
 def _extract_tooltip_text_from_page(page: Page) -> str | None:
-    dom_text = _extract_requisites_text_via_dom(page)
-    if _contains_requisites_text(dom_text or ""):
+    dom_text = _extract_requisites_text_via_dom(page, include_body_scan=False)
+    if _contains_seller_signal(dom_text or ""):
         return dom_text
 
-    for selector in TOOLTIP_VISIBLE_SELECTORS:
+    tooltip_selectors = list(TOOLTIP_VISIBLE_SELECTORS)
+    tooltip_selectors.extend(['.tooltip__content', '[role="tooltip"]', '[class*="tooltip"]'])
+
+    for selector in tooltip_selectors:
         try:
-            locator = page.locator(selector).first
-            if locator.count() == 0:
-                continue
-            text = locator.inner_text(timeout=500)
-            normalized = _normalize_text(text)
-            if normalized and _contains_requisites_text(normalized):
-                return normalized
+            for locator in _selector_candidates(page, selector):
+                text = locator.inner_text(timeout=500)
+                normalized = _normalize_text(text)
+                if normalized and _contains_seller_signal(normalized):
+                    return normalized
         except Exception:
             continue
     try:
         text = page.locator('.tooltip__content').last.inner_text(timeout=375)
         normalized = _normalize_text(text)
-        if normalized and _contains_requisites_text(normalized):
+        if normalized and _contains_seller_signal(normalized):
             return normalized
     except Exception:
         pass
@@ -933,7 +974,7 @@ def _extract_tooltip_text_from_html(html: str) -> str | None:
         block_candidates.append(match.group('body'))
 
     for raw_body in block_candidates:
-        if not _contains_requisites_text(raw_body):
+        if not _contains_seller_signal(raw_body):
             continue
         text = TAG_RE.sub(' ', raw_body)
         text = text.replace('&nbsp;', ' ')
@@ -941,8 +982,8 @@ def _extract_tooltip_text_from_html(html: str) -> str | None:
         if normalized:
             return normalized
 
-    if _contains_requisites_text(html):
-        index_candidates = [idx for marker in ('ИНН', 'ОГРН', 'ОГРНИП', 'КПП', 'Номер регистрации') if (idx := html.find(marker)) != -1]
+    if _contains_seller_signal(html):
+        index_candidates = [idx for marker in ('ИНН', 'ОГРН', 'ОГРНИП', 'КПП', 'Номер регистрации', 'УНП', 'БИН', 'ИИН', 'Республика Беларусь', 'Казахстан') if (idx := html.find(marker)) != -1]
         if index_candidates:
             start_idx = max(0, min(index_candidates) - 800)
             end_idx = min(len(html), max(index_candidates) + 1200)
@@ -987,6 +1028,44 @@ def _extract_seller_display_name(text: str) -> str | None:
 
 def _has_extracted_requisites(result: InspectResult) -> bool:
     return bool(result.inn or result.entity_type or result.ogrn or result.ogrnip)
+
+
+def _selector_candidates(page: Page, selector: str, max_items: int = 6) -> list[Locator]:
+    try:
+        locator = page.locator(selector)
+        count = min(locator.count(), max_items)
+    except Exception:
+        return []
+
+    visible_candidates: list[Locator] = []
+    fallback_candidates: list[Locator] = []
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible(timeout=250):
+                visible_candidates.append(candidate)
+            else:
+                fallback_candidates.append(candidate)
+        except Exception:
+            fallback_candidates.append(candidate)
+    return visible_candidates or fallback_candidates
+
+
+def _result_information_score(result: InspectResult) -> int:
+    score = 0
+    if result.inn:
+        score += 100
+    if result.ogrn or result.ogrnip:
+        score += 40
+    if result.entity_type:
+        score += 20
+    if result.parse_status in {"БЕЛОРУСЬ", "КАЗАХСТАН"}:
+        score += 25
+    if result.seller_display_name:
+        score += 5
+    if result.note:
+        score += 2
+    return score
 
 
 def _write_result_json(artifacts_dir: Path, row_number: int, result: InspectResult) -> None:
