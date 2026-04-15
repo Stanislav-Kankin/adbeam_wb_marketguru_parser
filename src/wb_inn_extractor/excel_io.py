@@ -90,7 +90,7 @@ def extract_research_rows(
     sheet_names = _normalize_sheet_selection(workbook.sheetnames, selected_sheets)
 
     result: list[ResearchRow] = []
-    seen_pairs: set[tuple[str, str]] = set()
+    seen_sellers: set[str] = set()
 
     for sheet_name in sheet_names:
         sheet = workbook[sheet_name]
@@ -111,13 +111,11 @@ def extract_research_rows(
             seller_raw = _coerce_to_string(_get_cell(row_values, sheet_meta["header_index"], REQUIRED_HEADERS["seller"]))
             product_name = _coerce_to_string(_get_cell(row_values, sheet_meta["header_index"], REQUIRED_HEADERS["product_name"]))
 
-            brand_key = _normalize_key_part(brand_raw)
             seller_key = _normalize_key_part(seller_raw)
-            unique_key = (brand_key, seller_key)
-            if brand_key or seller_key:
-                if unique_key in seen_pairs:
+            if seller_key:
+                if seller_key in seen_sellers:
                     continue
-                seen_pairs.add(unique_key)
+                seen_sellers.add(seller_key)
 
             research_row = ResearchRow(
                 source_sheet=sheet.title,

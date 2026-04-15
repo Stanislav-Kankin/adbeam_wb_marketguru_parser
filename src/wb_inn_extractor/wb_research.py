@@ -75,15 +75,9 @@ SELLER_TOOLTIP_TRIGGER_SELECTORS = [
     '.seller-details__title-wrap .seller-details__tip-info',
     '.seller-details__tip-info',
     '.seller-details__info-wrap .seller-details__tip-info',
-    '.seller-details__parameter-value .seller-details__tip',
-    '.seller-details__parameter-value .tip-question',
     '.seller-details__info-icon',
     '.seller-info__info-icon',
     '.seller-info i',
-    '.seller-rating__ico',
-    '[class*="sellerInfoRatingIcon"]',
-    '[class*="sellerInfoNameDefault"] + div',
-    '[class*="sellerInfo"] [class*="icon"]',
 ]
 
 TOOLTIP_VISIBLE_SELECTORS = [
@@ -96,8 +90,6 @@ DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS = [
     '[class*="seller"] [class*="info"]',
     '[class*="seller"] [class*="tooltip"]',
     '[class*="seller"] [class*="icon"]',
-    '[class*="rating"] [class*="icon"]',
-    '[class*="rating"] [class*="info"]',
 ]
 
 
@@ -216,6 +208,7 @@ class BatchInspector:
                     artifacts_dir=self.artifacts_dir,
                     profile_dir=self.profile_dir,
                     manual_wait_seconds=0,
+                    fast_success_exit=True,
                 )
 
                 if _is_unexpected_page_url(result.final_url):
@@ -327,6 +320,7 @@ def _inspect_product_row_on_page(
     artifacts_dir: Path,
     profile_dir: Path | None = None,
     manual_wait_seconds: int = 0,
+    fast_success_exit: bool = False,
 ) -> InspectResult:
     if not research_row.wb_candidate_url:
         raise ValueError('У строки нет wb_candidate_url')
@@ -359,6 +353,30 @@ def _inspect_product_row_on_page(
     if manual_wait_seconds > 0:
         time.sleep(manual_wait_seconds)
         captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites(page)
+
+    if fast_success_exit:
+        fast_result = _build_result(
+            row_number=row_number,
+            url=research_row.wb_candidate_url,
+            page=page,
+            http_status=response.status if response else None,
+            html="",
+            text="",
+            captured_tooltip_text=captured_tooltip_text,
+            screenshot_path=None,
+            html_path=None,
+            text_path=None,
+            used_persistent_profile=profile_dir is not None,
+            profile_dir=profile_dir,
+            manual_wait_seconds=manual_wait_seconds,
+            seller_url=seller_url,
+            navigated_to_seller_page=bool(seller_url) or '/seller/' in page.url,
+        )
+        if not fast_result.seller_display_name and research_row.seller_name_raw:
+            fast_result.seller_display_name = research_row.seller_name_raw
+        if _has_extracted_requisites(fast_result):
+            _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=fast_result)
+            return fast_result
 
     html_before_screenshot = _safe_page_content(page)
     captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html_before_screenshot)
@@ -404,10 +422,7 @@ def _inspect_product_row_on_page(
         if deep_result.inn or (deep_result.entity_type and not result.entity_type):
             result = deep_result
 
-    (artifacts_dir / f"row_{row_number}.json").write_text(
-        json.dumps(result.model_dump(mode='json'), ensure_ascii=False, indent=2),
-        encoding='utf-8',
-    )
+    _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=result)
     return result
 
 def inspect_product_row(
@@ -429,6 +444,7 @@ def inspect_product_row(
                 artifacts_dir=artifacts_dir,
                 profile_dir=profile_dir,
                 manual_wait_seconds=manual_wait_seconds,
+                fast_success_exit=False,
             )
         finally:
             context.close()
@@ -706,7 +722,10 @@ def _page_has_requisites_entrypoints(page: Page, deep_mode: bool) -> bool:
 
     for selector in selectors:
         try:
-            if page.locator(selector).first.count() > 0:
+            locator = page.locator(selector).first
+            if locator.count() == 0:
+                continue
+            if locator.is_visible(timeout=250):
                 return True
         except Exception:
             continue
@@ -721,9 +740,9 @@ def _build_result(
     html: str,
     text: str,
     captured_tooltip_text: str | None,
-    screenshot_path: Path,
-    html_path: Path,
-    text_path: Path,
+    screenshot_path: Path | None,
+    html_path: Path | None,
+    text_path: Path | None,
     used_persistent_profile: bool,
     profile_dir: Path | None,
     manual_wait_seconds: int,
@@ -795,9 +814,9 @@ def _build_result(
         entity_type=entity_type,
         seller_display_name=seller_display_name,
         note=note,
-        screenshot_path=str(screenshot_path),
-        html_path=str(html_path),
-        text_path=str(text_path),
+        screenshot_path=str(screenshot_path) if screenshot_path else None,
+        html_path=str(html_path) if html_path else None,
+        text_path=str(text_path) if text_path else None,
     )
 
 
@@ -964,6 +983,17 @@ def _extract_seller_display_name(text: str) -> str | None:
         return None
     value = " ".join(match.group(1).split())
     return value[:120] if _is_plausible_seller_display_name(value) else None
+
+
+def _has_extracted_requisites(result: InspectResult) -> bool:
+    return bool(result.inn or result.entity_type or result.ogrn or result.ogrnip)
+
+
+def _write_result_json(artifacts_dir: Path, row_number: int, result: InspectResult) -> None:
+    (artifacts_dir / f"row_{row_number}.json").write_text(
+        json.dumps(result.model_dump(mode='json'), ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
 
 
 def _best_effort_wait(page: Page, include_networkidle: bool = False, settle_rounds: int = 2) -> None:

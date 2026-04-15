@@ -90,7 +90,7 @@ def main() -> None:
         rows = extract_research_rows(args.input, limit=args.limit, selected_sheets=args.selected_sheets)
         save_research_sample(args.output, rows)
         print(f"Создан файл: {args.output}")
-        print(f"Строк (уникальных по продавцу+бренду): {len(rows)}")
+        print(f"Строк (уникальных по seller): {len(rows)}")
         rows_by_sheet = summarize_research_rows_by_sheet(rows)
         if rows_by_sheet:
             print("Распределение строк по листам:")

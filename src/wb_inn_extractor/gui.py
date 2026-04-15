@@ -230,7 +230,7 @@ class App:
         ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 8))
         ttk.Label(
             frame,
-            text="Создаёт общий sample по выбранным листам и убирает дубли бренд+продавец.",
+            text="Создаёт общий sample по выбранным листам и убирает дубли по имени seller.",
             style="Muted.TLabel",
             wraplength=380,
             justify="left",
@@ -648,8 +648,8 @@ class App:
         self._append_log(f"Создан файл: {output_path}\n")
         self._append_log(f"Листы для sample: {sheet_scope_label}\n")
         if limit is None:
-            self._append_log("Лимит строк не задан: в sample сохранены все уникальные продавцы по паре бренд+продавец\n")
-        self._append_log(f"Строк (уникальных по продавцу+бренду): {len(rows)}\n")
+            self._append_log("Лимит строк не задан: в sample сохранены все уникальные продавцы по имени seller\n")
+        self._append_log(f"Строк (уникальных по seller): {len(rows)}\n")
         self._append_log("Распределение строк по листам в sample:\n")
         for sheet_name, count in rows_by_sheet.items():
             self._append_log(f"  - {sheet_name}: {count}\n")

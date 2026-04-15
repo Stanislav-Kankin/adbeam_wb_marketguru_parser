@@ -1,20 +1,18 @@
 {
   "input_path": "C:/Users/Пользователь/Desktop/AdBeam/тест_парсер/Результаты/Электроника/Игровая техника/2026-03-14—2026-04-12_FBO_Новинки_и_старые_Электроника_Игровая_техника_Видеокарты_Видеокарты.xlsx",
-  "sample_output": "output\\research_sample.xlsx",
+  "sample_output": "C:/Users/Пользователь/Desktop/AdBeam/тест_парсер/Результаты/Электроника/Игровая техника/research_sample.xlsx",
   "artifacts_dir": "output\\artifacts",
   "profile_dir": "output\\wb_profile",
   "limit": "",
   "row": "2",
-  "batch_count": "175",
-  "batch_output": "output\\batch_results.xlsx",
+  "batch_count": "91",
+  "batch_output": "C:/Users/Пользователь/Desktop/AdBeam/тест_парсер/Результаты/Электроника/Игровая техника/batch_results.xlsx",
   "merge_batch_input": "output\\batch_results.xlsx",
   "compass_input": "",
   "enriched_output": "output\\final_enriched.xlsx",
   "sheet_mode": "selected",
-  "selected_sheets": [
-    "Отчёт"
-  ],
-  "selection_summary": "Последний sample: 175 строк | листов в sample: 1 | стартовая строка = 2",
-  "sample_summary": "Последний sample: 175 строк\nЛистов в sample: 1\nРекомендуемая стартовая строка для batch: 2",
+  "selected_sheets": [],
+  "selection_summary": "Последний sample: 91 строк | листов в sample: 1 | стартовая строка = 2",
+  "sample_summary": "Последний sample: 91 строк\nЛистов в sample: 1\nРекомендуемая стартовая строка для batch: 2",
   "headful": false
 }
