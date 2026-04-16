@@ -49,15 +49,23 @@ class ExcelWebsiteRows(BaseModel):
 class SiteSignals(BaseModel):
     has_catalog: bool = False
     has_cart: bool = False
+    has_checkout: bool = False
     has_buy_button: bool = False
     has_price: bool = False
+    has_product_page: bool = False
+    has_structured_product_data: bool = False
+    has_ecommerce_platform: bool = False
     has_delivery: bool = False
     has_payment: bool = False
     has_consumer_language: bool = False
+    has_manufacturer_language: bool = False
     request_only: bool = False
     callback_only: bool = False
     quote_only: bool = False
     has_b2b_language: bool = False
+    is_marketplace_domain: bool = False
+    direct_ecom_score: int = 0
+    ecommerce_pages_found: list[str] = Field(default_factory=list)
     has_wildberries_link: bool = False
     has_ozon_link: bool = False
     marketplace_links_found: list[str] = Field(default_factory=list)
@@ -76,6 +84,7 @@ class SiteAuditResult(BaseModel):
     status: SiteFitStatus
     status_reason: str
     signals: SiteSignals = Field(default_factory=SiteSignals)
+    checked_pages: list[str] = Field(default_factory=list)
     error: str | None = None
 
 

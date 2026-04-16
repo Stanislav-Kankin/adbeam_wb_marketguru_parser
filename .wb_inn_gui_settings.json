@@ -3,7 +3,7 @@
   "sample_output": "C:/Users/Пользователь/Desktop/AdBeam/тест_парсер/Результаты/Электроника/Игровая техника/research_sample.xlsx",
   "adbeam_input_path": "C:\\dev\\prod\\adbeam_wb_marketguru_parser\\output\\final_enriched.xlsx",
   "adbeam_output_path": "C:\\dev\\prod\\adbeam_wb_marketguru_parser\\output\\final_enriched_audited.xlsx",
-  "adbeam_summary": "Проверено сайтов: 5\nСтатусы: BROKEN: 2, FIT_LATER: 2, FIT_NOW: 1\nИтоговый файл: C:\\dev\\prod\\adbeam_wb_marketguru_parser\\output\\final_enriched_audited.xlsx",
+  "adbeam_summary": "Проверено сайтов: 5\nСтатусы: FIT_LATER: 1, FIT_NOW: 3, NOT_FIT: 1\nИтоговый файл: C:\\dev\\prod\\adbeam_wb_marketguru_parser\\output\\final_enriched_audited.xlsx",
   "artifacts_dir": "output\\artifacts",
   "profile_dir": "output\\wb_profile",
   "limit": "",
@@ -23,7 +23,7 @@
   "registry_summary": "Файлов batch: 3\nСтрок всего: 514\nСтрок с ИНН: 420\nНовых ИНН добавлено: 0\nУже были в реестре: 378\nДубликаты в импорте: 42\nПропущено без ИНН: 94\nВсего ИНН в реестре: 347\nРеестр: output\\inn_r22.xlsx\nНовые ИНН для Контур: output\\new_inn_for_kontur.xlsx",
   "sheet_mode": "selected",
   "selected_sheets": [],
-  "selection_summary": "Последний sample: 91 строк | листов в sample: 1 | стартовая строка = 2",
+  "selection_summary": "Выбор листов: сначала проанализируй книгу",
   "sample_summary": "Последний sample: 91 строк\nЛистов в sample: 1\nРекомендуемая стартовая строка для batch: 2",
   "headful": false
 }
