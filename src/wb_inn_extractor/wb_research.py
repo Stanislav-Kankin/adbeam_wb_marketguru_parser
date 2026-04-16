@@ -753,7 +753,6 @@ def _page_has_requisites_entrypoints(page: Page, deep_mode: bool) -> bool:
 
 def _build_result(
     row_number: int,
-    url: str,
     page: Page,
     http_status: int | None,
     html: str,
