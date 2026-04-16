@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .excel_io import (
     analyze_workbook,
+    discover_batch_results,
     extract_research_rows,
     read_research_row,
     read_research_rows_range,
@@ -21,6 +22,7 @@ from .excel_io import (
     save_batch_results,
     save_research_sample,
     summarize_research_rows_by_sheet,
+    update_inn_registry_from_batch_files,
 )
 from .models import AnalyzeSummary
 from .wb_research import BatchInspector, build_row_error_result, inspect_product_row
@@ -47,6 +49,9 @@ class App:
         self.merge_batch_input_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
         self.compass_input_var = tk.StringVar()
         self.enriched_output_var = tk.StringVar(value=str(Path("output/final_enriched.xlsx")))
+        self.registry_path_var = tk.StringVar(value=str(Path("output/inn_registry.xlsx")))
+        self.registry_new_inn_output_var = tk.StringVar(value=str(Path("output/new_inn_for_kontur.xlsx")))
+        self.registry_summary_var = tk.StringVar(value="Реестр ещё не обновлялся")
         self.headful_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Готово")
         self.sheet_mode_var = tk.StringVar(value="all")
@@ -65,6 +70,7 @@ class App:
         self._progress_total: int = 0
         self._progress_done: int = 0
         self._settings_loaded_selected_sheets: list[str] = []
+        self._registry_batch_files: list[str] = []
 
         self._configure_theme()
         self._load_settings()
@@ -111,7 +117,7 @@ class App:
         self.root.columnconfigure(0, weight=1)
 
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(4, weight=1)
+        container.rowconfigure(1, weight=1)
 
         header = ttk.Frame(container)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -119,16 +125,29 @@ class App:
         ttk.Label(header, text="WB INN Extractor", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             header,
-            text="Пайплайн: Excel → листы → sample → WB → batch_results → Compass → final_enriched",
+            text="Пайплайн: WB → batch_results → реестр ИНН → Контур.Поиск клиентов → final_enriched",
             style="Muted.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
         ttk.Label(header, textvariable=self.clock_var, style="Muted.TLabel").grid(row=0, column=1, sticky="e")
         ttk.Label(header, textvariable=self.status_var, style="HeaderValue.TLabel").grid(row=1, column=1, sticky="e")
 
-        self._build_source_block(container).grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        notebook = ttk.Notebook(container)
+        notebook.grid(row=1, column=0, sticky="nsew")
 
-        top_grid = ttk.Frame(container)
-        top_grid.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        extract_tab = ttk.Frame(notebook, padding=8)
+        registry_tab = ttk.Frame(notebook, padding=8)
+        kontur_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(extract_tab, text="Извлечение ИНН")
+        notebook.add(registry_tab, text="Реестр ИНН")
+        notebook.add(kontur_tab, text="Склейка с Контур")
+
+        extract_tab.columnconfigure(0, weight=1)
+        extract_tab.rowconfigure(4, weight=1)
+
+        self._build_source_block(extract_tab).grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        top_grid = ttk.Frame(extract_tab)
+        top_grid.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
         top_grid.columnconfigure(0, weight=1, uniform="top_halves")
         top_grid.columnconfigure(1, weight=1, uniform="top_halves")
         top_grid.rowconfigure(0, weight=1)
@@ -136,16 +155,22 @@ class App:
         self._build_sheet_block(top_grid).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self._build_sample_block(top_grid).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        mid_grid = ttk.Frame(container)
-        mid_grid.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
-        mid_grid.columnconfigure(0, weight=1, uniform="mid_halves")
-        mid_grid.columnconfigure(1, weight=1, uniform="mid_halves")
+        mid_grid = ttk.Frame(extract_tab)
+        mid_grid.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        mid_grid.columnconfigure(0, weight=1)
         mid_grid.rowconfigure(0, weight=1)
 
-        self._build_wb_block(mid_grid).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self._build_compass_block(mid_grid).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self._build_wb_block(mid_grid).grid(row=0, column=0, sticky="nsew")
 
-        self._build_status_log_block(container).grid(row=4, column=0, sticky="nsew")
+        self._build_status_log_block(extract_tab).grid(row=4, column=0, sticky="nsew")
+
+        registry_tab.columnconfigure(0, weight=1)
+        registry_tab.rowconfigure(0, weight=1)
+        self._build_registry_tab(registry_tab).grid(row=0, column=0, sticky="nsew")
+
+        kontur_tab.columnconfigure(0, weight=1)
+        kontur_tab.rowconfigure(0, weight=1)
+        self._build_compass_block(kontur_tab).grid(row=0, column=0, sticky="new")
         self._restore_settings_to_widgets()
 
     def _build_source_block(self, parent):
@@ -277,14 +302,14 @@ class App:
         return frame
 
     def _build_compass_block(self, parent):
-        frame = ttk.LabelFrame(parent, text="5. Склейка с Compass", padding=12, style="Card.TLabelframe")
+        frame = ttk.LabelFrame(parent, text="Склейка с Контур.Поиск клиентов", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(1, weight=1)
 
         ttk.Label(frame, text="Файл batch_results для склейки", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.merge_batch_input_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
         ttk.Button(frame, text="Выбрать", command=self._choose_merge_batch_input, style="Secondary.TButton").grid(row=0, column=2, pady=4)
 
-        ttk.Label(frame, text="Выгрузка Compass", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Выгрузка Контур", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.compass_input_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
         ttk.Button(frame, text="Выбрать", command=self._choose_compass_input, style="Secondary.TButton").grid(row=1, column=2, pady=4)
 
@@ -294,8 +319,8 @@ class App:
 
         ttk.Button(
             frame,
-            text="Склеить с Compass",
-            command=lambda: self._run_in_thread(self._action_merge_compass, task_name="Склейка с Compass"),
+            text="Склеить с Контур",
+            command=lambda: self._run_in_thread(self._action_merge_compass, task_name="Склейка с Контур"),
             style="Primary.TButton",
         ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 8))
         ttk.Label(
@@ -305,6 +330,84 @@ class App:
             wraplength=450,
             justify="left",
         ).grid(row=4, column=0, columnspan=3, sticky="w")
+        return frame
+
+    def _build_registry_tab(self, parent):
+        frame = ttk.Frame(parent)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        settings = ttk.LabelFrame(frame, text="Реестр ИНН", padding=12, style="Card.TLabelframe")
+        settings.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        settings.columnconfigure(1, weight=1)
+
+        ttk.Label(settings, text="Основной реестр", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(settings, textvariable=self.registry_path_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(settings, text="Выбрать", command=self._choose_registry_path, style="Secondary.TButton").grid(row=0, column=2, pady=4)
+
+        ttk.Label(settings, text="Новые ИНН для Контур", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(settings, textvariable=self.registry_new_inn_output_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(settings, text="Выбрать", command=self._choose_registry_new_inn_output, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+
+        ttk.Label(
+            settings,
+            text="Один ИНН = одна строка. Если ИНН уже есть, первые seller/category не меняются; обновляются last_seen и seen_count.",
+            style="Muted.TLabel",
+            wraplength=900,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        files = ttk.LabelFrame(frame, text="Batch-файлы для импорта", padding=12, style="Card.TLabelframe")
+        files.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        files.columnconfigure(0, weight=1)
+        files.rowconfigure(0, weight=1)
+
+        list_frame = ttk.Frame(files)
+        list_frame.grid(row=0, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self.registry_batch_listbox = tk.Listbox(
+            list_frame,
+            height=10,
+            exportselection=False,
+            bg="#ffffff",
+            fg="#1f2a37",
+            selectbackground="#2f6fed",
+            selectforeground="#ffffff",
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="#dbe4f0",
+            relief="solid",
+        )
+        self.registry_batch_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.registry_batch_listbox.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.registry_batch_listbox.configure(yscrollcommand=scrollbar.set)
+
+        file_buttons = ttk.Frame(files)
+        file_buttons.grid(row=0, column=1, sticky="ns", padx=(12, 0))
+        ttk.Button(file_buttons, text="Добавить файлы", command=self._add_registry_batch_files, style="Secondary.TButton").grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(file_buttons, text="Добавить папку", command=self._add_registry_batch_dir, style="Secondary.TButton").grid(row=1, column=0, sticky="ew", pady=8)
+        ttk.Button(file_buttons, text="Очистить список", command=self._clear_registry_batch_files, style="Secondary.TButton").grid(row=2, column=0, sticky="ew", pady=8)
+
+        actions = ttk.Frame(frame)
+        actions.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        for index in range(4):
+            actions.columnconfigure(index, weight=1)
+        ttk.Button(
+            actions,
+            text="Обновить реестр",
+            command=lambda: self._run_in_thread(self._action_update_registry, task_name="Обновление реестра ИНН"),
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(actions, text="Открыть реестр", command=self._open_registry_path, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(actions, text="Открыть новые ИНН", command=self._open_registry_new_inn, style="Secondary.TButton").grid(row=0, column=2, sticky="ew", padx=6)
+        ttk.Button(actions, text="Взять текущий batch", command=self._use_current_batch_for_registry, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=(6, 0))
+
+        summary = ttk.LabelFrame(frame, text="Сводка", padding=12, style="Card.TLabelframe")
+        summary.grid(row=3, column=0, sticky="ew")
+        summary.columnconfigure(0, weight=1)
+        ttk.Label(summary, textvariable=self.registry_summary_var, style="Body.TLabel", justify="left").grid(row=0, column=0, sticky="ew")
         return frame
 
     def _build_status_log_block(self, parent):
@@ -372,12 +475,26 @@ class App:
             self.merge_batch_input_var,
             self.compass_input_var,
             self.enriched_output_var,
+            self.registry_path_var,
+            self.registry_new_inn_output_var,
             self.sheet_mode_var,
         ]
         for var in self._tracked_vars:
             var.trace_add("write", lambda *_: self._save_settings())
         self.headful_var.trace_add("write", lambda *_: self._save_settings())
 
+
+    def _open_registry_path(self) -> None:
+        path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден реестр ИНН: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _open_registry_new_inn(self) -> None:
+        path = Path(self.registry_new_inn_output_var.get().strip() or "output/new_inn_for_kontur.xlsx")
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден файл новых ИНН: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
 
     @staticmethod
     def _format_duration_hms(seconds: float) -> str:
@@ -415,6 +532,8 @@ class App:
             "merge_batch_input": self.merge_batch_input_var,
             "compass_input": self.compass_input_var,
             "enriched_output": self.enriched_output_var,
+            "registry_path": self.registry_path_var,
+            "registry_new_inn_output": self.registry_new_inn_output_var,
             "sheet_mode": self.sheet_mode_var,
         }.items():
             value = settings.get(key)
@@ -431,6 +550,13 @@ class App:
         sample_summary = settings.get("sample_summary")
         if isinstance(sample_summary, str) and sample_summary:
             self.sample_summary_var.set(sample_summary)
+        registry_summary = settings.get("registry_summary")
+        if isinstance(registry_summary, str) and registry_summary:
+            self.registry_summary_var.set(registry_summary)
+        registry_batch_files = settings.get("registry_batch_files")
+        if isinstance(registry_batch_files, list):
+            self._registry_batch_files = [str(path) for path in registry_batch_files]
+            self._refresh_registry_batch_listbox()
 
     def _save_settings(self) -> None:
         try:
@@ -446,6 +572,10 @@ class App:
                 "merge_batch_input": self.merge_batch_input_var.get().strip(),
                 "compass_input": self.compass_input_var.get().strip(),
                 "enriched_output": self.enriched_output_var.get().strip(),
+                "registry_path": self.registry_path_var.get().strip(),
+                "registry_new_inn_output": self.registry_new_inn_output_var.get().strip(),
+                "registry_batch_files": list(self._registry_batch_files),
+                "registry_summary": self.registry_summary_var.get(),
                 "sheet_mode": self.sheet_mode_var.get(),
                 "selected_sheets": self._get_selected_sheet_names_from_ui() if hasattr(self, "sheet_listbox") else [],
                 "selection_summary": self.selection_summary_var.get(),
@@ -491,7 +621,7 @@ class App:
             self.profile_dir_var.set(path)
 
     def _choose_compass_input(self) -> None:
-        path = filedialog.askopenfilename(title="Выбери выгрузку Compass", filetypes=[("Excel", "*.xlsx *.xlsm *.xls")])
+        path = filedialog.askopenfilename(title="Выбери выгрузку Контур", filetypes=[("Excel", "*.xlsx *.xlsm *.xls")])
         if path:
             self.compass_input_var.set(path)
 
@@ -522,6 +652,82 @@ class App:
         )
         if path:
             self.merge_batch_input_var.set(path)
+
+    def _choose_registry_path(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Выбери или создай реестр ИНН",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=Path(self.registry_path_var.get()).name,
+        )
+        if path:
+            self.registry_path_var.set(path)
+
+    def _choose_registry_new_inn_output(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить новые ИНН для Контур",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=Path(self.registry_new_inn_output_var.get()).name,
+        )
+        if path:
+            self.registry_new_inn_output_var.set(path)
+
+    def _add_registry_batch_files(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Выбери batch_results.xlsx",
+            filetypes=[("batch_results.xlsx", "batch_results.xlsx"), ("Excel", "*.xlsx *.xlsm *.xls")],
+        )
+        if paths:
+            self._add_registry_batch_paths([Path(path) for path in paths])
+
+    def _add_registry_batch_dir(self) -> None:
+        path = filedialog.askdirectory(title="Папка с batch_results.xlsx")
+        if not path:
+            return
+        batch_paths = discover_batch_results(Path(path))
+        if not batch_paths:
+            messagebox.showinfo("Реестр ИНН", "В папке не найдено batch_results.xlsx")
+            return
+        self._add_registry_batch_paths(batch_paths)
+
+    def _use_current_batch_for_registry(self) -> None:
+        path = Path(self.batch_output_var.get().strip())
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден текущий batch_results.xlsx: {path}")
+        self._add_registry_batch_paths([path])
+
+    def _add_registry_batch_paths(self, paths: list[Path]) -> None:
+        existing = set(self._registry_batch_files)
+        added = 0
+        skipped = 0
+        for path in paths:
+            if path.name.casefold() != "batch_results.xlsx":
+                skipped += 1
+                continue
+            normalized = str(path)
+            if normalized in existing:
+                continue
+            self._registry_batch_files.append(normalized)
+            existing.add(normalized)
+            added += 1
+        self._refresh_registry_batch_listbox()
+        suffix = f" Пропущено не-batch файлов: {skipped}." if skipped else ""
+        self.registry_summary_var.set(f"Добавлено batch-файлов: {added}. Всего в списке: {len(self._registry_batch_files)}.{suffix}")
+        self._save_settings()
+
+    def _clear_registry_batch_files(self) -> None:
+        self._registry_batch_files = []
+        self._refresh_registry_batch_listbox()
+        self.registry_summary_var.set("Список batch-файлов очищен")
+        self._save_settings()
+
+    def _refresh_registry_batch_listbox(self) -> None:
+        if not hasattr(self, "registry_batch_listbox"):
+            return
+        self.registry_batch_listbox.delete(0, "end")
+        for path in self._registry_batch_files:
+            self.registry_batch_listbox.insert("end", path)
 
     def _open_artifacts_dir(self) -> None:
         self._open_dir(self.artifacts_dir_var.get())
@@ -781,6 +987,54 @@ class App:
         self._append_log(f"Batch: итоговый файл сохранён: {batch_output}\n")
         self._append_log(f"Batch: рекомендованная следующая стартовая строка = {next_row}\n")
         self.root.after(0, lambda: messagebox.showinfo("Batch завершён", f"Итоговый Excel сохранён:\n{batch_output}"))
+        self.root.after(0, lambda batch_output=batch_output: self._prompt_add_batch_to_registry(batch_output))
+
+    def _prompt_add_batch_to_registry(self, batch_output: Path) -> None:
+        if messagebox.askyesno(
+            "Реестр ИНН",
+            "Batch завершён. Добавить этот batch_results.xlsx во вкладку Реестр ИНН?",
+        ):
+            self._add_registry_batch_paths([batch_output])
+
+    def _action_update_registry(self) -> None:
+        if not self._registry_batch_files:
+            raise ValueError("Сначала добавь хотя бы один batch_results.xlsx")
+
+        batch_paths = [Path(path) for path in self._registry_batch_files]
+        missing = [str(path) for path in batch_paths if not path.exists()]
+        if missing:
+            raise FileNotFoundError("Не найдены batch-файлы:\n" + "\n".join(missing[:10]))
+
+        registry_path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
+        new_inn_output_path = Path(self.registry_new_inn_output_var.get().strip() or "output/new_inn_for_kontur.xlsx")
+
+        self._append_log(f"Registry: registry={registry_path}\n")
+        self._append_log(f"Registry: new_inn={new_inn_output_path}\n")
+        self._append_log(f"Registry: batch_files={len(batch_paths)}\n")
+
+        summary = update_inn_registry_from_batch_files(
+            batch_results_paths=batch_paths,
+            registry_path=registry_path,
+            new_inn_output_path=new_inn_output_path,
+        )
+
+        text = (
+            f"Файлов batch: {summary['batch_files']}\n"
+            f"Строк всего: {summary['rows_total']}\n"
+            f"Строк с ИНН: {summary['rows_with_inn']}\n"
+            f"Новых ИНН добавлено: {summary['new_inn_added']}\n"
+            f"Уже были в реестре: {summary['already_known']}\n"
+            f"Дубликаты в импорте: {summary['duplicate_in_import']}\n"
+            f"Пропущено без ИНН: {summary['skipped_without_inn']}\n"
+            f"Всего ИНН в реестре: {summary['registry_rows']}\n"
+            f"Реестр: {summary['registry_path']}\n"
+            f"Новые ИНН для Контур: {summary['new_inn_output_path']}"
+        )
+        self.registry_summary_var.set(text)
+        self._append_log("Registry: обновление завершено\n")
+        self._append_log(text + "\n")
+        self._save_settings()
+        self.root.after(0, lambda: messagebox.showinfo("Реестр ИНН обновлён", text))
 
     def _action_merge_compass(self) -> None:
         batch_results_value = self.merge_batch_input_var.get().strip() or self.batch_output_var.get().strip() or "output/batch_results.xlsx"
@@ -790,10 +1044,10 @@ class App:
 
         compass_value = self.compass_input_var.get().strip()
         if not compass_value:
-            raise ValueError("Сначала выбери выгрузку Compass")
+            raise ValueError("Сначала выбери выгрузку Контур")
         compass_path = Path(compass_value)
         if not compass_path.exists():
-            raise FileNotFoundError(f"Не найден файл Compass: {compass_path}")
+            raise FileNotFoundError(f"Не найден файл Контур: {compass_path}")
 
         output_path = Path(self.enriched_output_var.get().strip() or "output/final_enriched.xlsx")
         output_path.parent.mkdir(parents=True, exist_ok=True)

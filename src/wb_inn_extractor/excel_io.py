@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from collections import Counter
+from datetime import datetime
 from typing import Any, Iterable
 
 from openpyxl import Workbook, load_workbook
@@ -26,6 +27,45 @@ COMPASS_INN_HEADER_CANDIDATES = [
     "ИНН компании",
     "ИНН контрагента",
 ]
+
+INN_REGISTRY_HEADERS = [
+    "first_category",
+    "seller_name_raw",
+    "seller_display_name",
+    "entity_type",
+    "inn",
+    "ogrn",
+    "ogrnip",
+    "seller_url",
+    "wb_candidate_url",
+    "parse_status",
+    "note",
+    "seen_count",
+    "first_seen_at",
+    "last_seen_at",
+    "first_source_batch",
+    "last_source_batch",
+]
+
+INN_IMPORT_HEADERS = [
+    "imported_at",
+    "source_batch_file",
+    "category",
+    "rows_total",
+    "rows_with_inn",
+    "unique_inn_in_file",
+    "new_inn_added",
+    "already_known",
+    "duplicate_in_file",
+    "skipped_without_inn",
+]
+
+BATCH_RESULTS_REQUIRED_HEADERS = {
+    "inn",
+    "seller_name_raw",
+    "wb_candidate_url",
+    "parse_status",
+}
 
 
 def load_active_sheet(input_path: Path):
@@ -611,6 +651,316 @@ def export_compass_unmatched(final_enriched_path: Path, output_path: Path) -> di
     }
 
 
+def update_inn_registry_from_batch_files(
+    batch_results_paths: list[Path],
+    registry_path: Path,
+    new_inn_output_path: Path | None = None,
+) -> dict[str, Any]:
+    imported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    registry_rows, import_rows = _read_inn_registry_payload(registry_path)
+    registry_by_inn: dict[str, dict[str, Any]] = {}
+    for row in registry_rows:
+        normalized_inn = _normalize_inn_value(row.get("inn"))
+        if normalized_inn:
+            row["inn"] = normalized_inn
+            registry_by_inn.setdefault(normalized_inn, row)
+
+    total_rows = 0
+    rows_with_inn = 0
+    skipped_without_inn = 0
+    already_known = 0
+    duplicate_in_import = 0
+    new_rows: list[dict[str, Any]] = []
+    seen_in_import: set[str] = set()
+    per_file_summaries: list[dict[str, Any]] = []
+
+    for batch_path in batch_results_paths:
+        _validate_batch_results_file(batch_path)
+        batch_rows = _read_sheet_as_dicts(batch_path)
+        category = _infer_category_from_batch_path(batch_path)
+        file_rows_total = len(batch_rows)
+        file_rows_with_inn = 0
+        file_new = 0
+        file_known = 0
+        file_duplicates = 0
+        file_skipped_without_inn = 0
+        seen_in_file: set[str] = set()
+
+        for row in batch_rows:
+            total_rows += 1
+            normalized_inn = _normalize_inn_value(row.get("inn"))
+            if not normalized_inn:
+                skipped_without_inn += 1
+                file_skipped_without_inn += 1
+                continue
+
+            rows_with_inn += 1
+            file_rows_with_inn += 1
+
+            if normalized_inn in seen_in_file:
+                duplicate_in_import += 1
+                file_duplicates += 1
+                continue
+            seen_in_file.add(normalized_inn)
+
+            if normalized_inn in registry_by_inn:
+                already_known += 1
+                file_known += 1
+                existing = registry_by_inn[normalized_inn]
+                existing["seen_count"] = _coerce_int(existing.get("seen_count"), default=1) + 1
+                existing["last_seen_at"] = imported_at
+                existing["last_source_batch"] = str(batch_path)
+                continue
+
+            if normalized_inn in seen_in_import:
+                duplicate_in_import += 1
+                file_duplicates += 1
+                continue
+            seen_in_import.add(normalized_inn)
+
+            registry_row = _build_registry_row(
+                inn=normalized_inn,
+                batch_row=row,
+                batch_path=batch_path,
+                category=category,
+                imported_at=imported_at,
+            )
+            registry_rows.append(registry_row)
+            registry_by_inn[normalized_inn] = registry_row
+            new_rows.append(registry_row)
+            file_new += 1
+
+        per_file_summaries.append({
+            "source_batch_file": str(batch_path),
+            "category": category,
+            "rows_total": file_rows_total,
+            "rows_with_inn": file_rows_with_inn,
+            "unique_inn_in_file": len(seen_in_file),
+            "new_inn_added": file_new,
+            "already_known": file_known,
+            "duplicate_in_file": file_duplicates,
+            "skipped_without_inn": file_skipped_without_inn,
+        })
+        import_rows.append({
+            "imported_at": imported_at,
+            "source_batch_file": str(batch_path),
+            "category": category,
+            "rows_total": file_rows_total,
+            "rows_with_inn": file_rows_with_inn,
+            "unique_inn_in_file": len(seen_in_file),
+            "new_inn_added": file_new,
+            "already_known": file_known,
+            "duplicate_in_file": file_duplicates,
+            "skipped_without_inn": file_skipped_without_inn,
+        })
+
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_inn_registry_workbook(registry_path, registry_rows, import_rows)
+
+    if new_inn_output_path is not None:
+        new_inn_output_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_dict_rows_to_excel(
+            new_inn_output_path,
+            [{"inn": row.get("inn")} for row in new_rows],
+            preferred_headers=["inn"],
+            sheet_name="inn_for_kontur",
+        )
+
+    return {
+        "batch_files": len(batch_results_paths),
+        "rows_total": total_rows,
+        "rows_with_inn": rows_with_inn,
+        "registry_rows": len(registry_by_inn),
+        "new_inn_added": len(new_rows),
+        "already_known": already_known,
+        "duplicate_in_import": duplicate_in_import,
+        "skipped_without_inn": skipped_without_inn,
+        "registry_path": str(registry_path),
+        "new_inn_output_path": str(new_inn_output_path) if new_inn_output_path else None,
+        "files": per_file_summaries,
+    }
+
+
+def discover_batch_results(root_dir: Path) -> list[Path]:
+    if root_dir.is_file():
+        return [root_dir] if _is_batch_results_filename(root_dir) else []
+    if not root_dir.exists():
+        raise FileNotFoundError(f"Папка не найдена: {root_dir}")
+    return sorted(
+        (path for path in root_dir.rglob("*.xlsx") if _is_batch_results_filename(path)),
+        key=lambda path: str(path).casefold(),
+    )
+
+
+def _is_batch_results_filename(path: Path) -> bool:
+    return path.name.casefold() == "batch_results.xlsx"
+
+
+def _validate_batch_results_file(path: Path) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"Не найден batch_results.xlsx: {path}")
+    if not _is_batch_results_filename(path):
+        raise ValueError(f"В реестр можно импортировать только файлы batch_results.xlsx: {path}")
+
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    sheet = workbook[workbook.sheetnames[0]]
+    rows_iter = sheet.iter_rows(values_only=True)
+    try:
+        header_row = next(rows_iter)
+    except StopIteration as exc:
+        raise ValueError(f"Пустой batch_results.xlsx: {path}") from exc
+    headers = {_coerce_header(value) for value in header_row if _coerce_header(value)}
+    missing = sorted(BATCH_RESULTS_REQUIRED_HEADERS - headers)
+    if missing:
+        raise ValueError(
+            f"Файл не похож на batch_results.xlsx: {path}. Не найдены колонки: {', '.join(missing)}"
+        )
+
+
+def _read_inn_registry_payload(registry_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not registry_path.exists():
+        return [], []
+
+    workbook = load_workbook(registry_path, read_only=True, data_only=True)
+    registry_sheet_name = "inn_registry" if "inn_registry" in workbook.sheetnames else workbook.sheetnames[0]
+    registry_rows = _read_worksheet_as_dicts(workbook[registry_sheet_name])
+    import_rows = _read_worksheet_as_dicts(workbook["imports"]) if "imports" in workbook.sheetnames else []
+    return registry_rows, import_rows
+
+
+def _read_worksheet_as_dicts(sheet: Worksheet) -> list[dict[str, Any]]:
+    rows_iter = sheet.iter_rows(values_only=True)
+    try:
+        header_row = next(rows_iter)
+    except StopIteration:
+        return []
+    headers = [_coerce_header(value) for value in header_row]
+    result: list[dict[str, Any]] = []
+    for row in rows_iter:
+        row_dict = dict(zip(headers, row, strict=False))
+        if _is_effectively_empty_row(row_dict.values()):
+            continue
+        result.append(row_dict)
+    return result
+
+
+def _build_registry_row(
+    inn: str,
+    batch_row: dict[str, Any],
+    batch_path: Path,
+    category: str,
+    imported_at: str,
+) -> dict[str, Any]:
+    return {
+        "inn": inn,
+        "first_category": category,
+        "first_source_batch": str(batch_path),
+        "first_seen_at": imported_at,
+        "seller_name_raw": batch_row.get("marketguru_seller_name") or batch_row.get("seller_name_raw"),
+        "seller_display_name": batch_row.get("wb_seller_name") or batch_row.get("seller_display_name"),
+        "entity_type": batch_row.get("entity_type"),
+        "ogrn": batch_row.get("ogrn"),
+        "ogrnip": batch_row.get("ogrnip"),
+        "seller_url": batch_row.get("wb_seller_url") or batch_row.get("seller_url"),
+        "wb_candidate_url": batch_row.get("marketguru_candidate_url") or batch_row.get("wb_candidate_url"),
+        "parse_status": batch_row.get("parse_status"),
+        "note": batch_row.get("parse_note") or batch_row.get("note"),
+        "seen_count": 1,
+        "last_seen_at": imported_at,
+        "last_source_batch": str(batch_path),
+    }
+
+
+def _write_inn_registry_workbook(
+    registry_path: Path,
+    registry_rows: list[dict[str, Any]],
+    import_rows: list[dict[str, Any]],
+) -> None:
+    workbook = Workbook()
+    registry_sheet = workbook.active
+    registry_sheet.title = "inn_registry"
+    registry_sheet.append(INN_REGISTRY_HEADERS)
+    for row in registry_rows:
+        registry_sheet.append([row.get(header) for header in INN_REGISTRY_HEADERS])
+
+    imports_sheet = workbook.create_sheet("imports")
+    imports_sheet.append(INN_IMPORT_HEADERS)
+    for row in import_rows:
+        imports_sheet.append([row.get(header) for header in INN_IMPORT_HEADERS])
+
+    _format_registry_sheet(registry_sheet)
+    _format_imports_sheet(imports_sheet)
+    workbook.save(registry_path)
+
+
+def _format_registry_sheet(sheet: Worksheet) -> None:
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = {
+        "A": 28,
+        "B": 28,
+        "C": 28,
+        "D": 14,
+        "E": 16,
+        "F": 16,
+        "G": 18,
+        "H": 42,
+        "I": 44,
+        "J": 18,
+        "K": 42,
+        "L": 12,
+        "M": 20,
+        "N": 20,
+        "O": 65,
+        "P": 65,
+    }
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+
+
+def _format_imports_sheet(sheet: Worksheet) -> None:
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = {
+        "A": 20,
+        "B": 65,
+        "C": 28,
+        "D": 12,
+        "E": 14,
+        "F": 16,
+        "G": 16,
+        "H": 14,
+        "I": 16,
+        "J": 18,
+    }
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+
+
+def _infer_category_from_batch_path(batch_path: Path) -> str:
+    parent = batch_path.parent
+    parts = list(parent.parts)
+    lowered = [part.casefold() for part in parts]
+    for marker in ("результаты", "results"):
+        if marker in lowered:
+            index = lowered.index(marker)
+            tail = parts[index + 1 :]
+            if tail:
+                return " / ".join(tail)
+    return parent.name
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 
 def _write_dict_rows_to_excel(
     output_path: Path,
@@ -624,7 +974,7 @@ def _write_dict_rows_to_excel(
 
     headers: list[str] = []
     if preferred_headers:
-        headers.extend([header for header in preferred_headers if any(header in row for row in rows)])
+        headers.extend(preferred_headers)
 
     seen = set(headers)
     for row in rows:
