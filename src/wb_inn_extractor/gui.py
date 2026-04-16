@@ -12,6 +12,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from adbeam_excel_parser.audit_runner import attach_output_file_path, run_excel_audit
+from adbeam_excel_parser.excel_exporter import build_output_path, export_audit_to_excel
+from adbeam_excel_parser.excel_reader import read_excel_summary
 from .excel_io import (
     analyze_workbook,
     discover_batch_results,
@@ -58,7 +61,10 @@ class App:
         self.sheet_summary_var = tk.StringVar(value="Листы ещё не проанализированы")
         self.selection_summary_var = tk.StringVar(value="Выбор листов: все валидные после анализа")
         self.sample_summary_var = tk.StringVar(value="Sample ещё не создавался")
-
+        self.adbeam_input_path_var = tk.StringVar()
+        self.adbeam_output_path_var = tk.StringVar()
+        self.adbeam_summary_var = tk.StringVar(value="AdBeam аудит ещё не запускался")
+        self.adbeam_progress_var = tk.StringVar(value="Ожидание Excel-файла для аудита сайтов")
         self.clock_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Ожидание запуска")
         self.progress_detail_var = tk.StringVar(value="Прогресс появится во время пакетного прогона")
@@ -135,12 +141,13 @@ class App:
         notebook.grid(row=1, column=0, sticky="nsew")
 
         extract_tab = ttk.Frame(notebook, padding=8)
+        adbeam_tab = ttk.Frame(notebook, padding=8)
         registry_tab = ttk.Frame(notebook, padding=8)
         kontur_tab = ttk.Frame(notebook, padding=8)
         notebook.add(extract_tab, text="Извлечение ИНН")
         notebook.add(registry_tab, text="Реестр ИНН")
         notebook.add(kontur_tab, text="Склейка с Контур")
-
+        notebook.add(adbeam_tab, text="Аудит сайтов")
         extract_tab.columnconfigure(0, weight=1)
         extract_tab.rowconfigure(4, weight=1)
 
@@ -164,6 +171,10 @@ class App:
 
         self._build_status_log_block(extract_tab).grid(row=4, column=0, sticky="nsew")
 
+        adbeam_tab.columnconfigure(0, weight=1)
+        adbeam_tab.rowconfigure(0, weight=1)
+        self._build_adbeam_tab(adbeam_tab).grid(row=0, column=0, sticky="nsew")
+
         registry_tab.columnconfigure(0, weight=1)
         registry_tab.rowconfigure(0, weight=1)
         self._build_registry_tab(registry_tab).grid(row=0, column=0, sticky="nsew")
@@ -173,6 +184,69 @@ class App:
         self._build_compass_block(kontur_tab).grid(row=0, column=0, sticky="new")
         self._restore_settings_to_widgets()
 
+    def _build_adbeam_tab(self, parent):
+        frame = ttk.Frame(parent)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
+
+        source = ttk.LabelFrame(frame, text="AdBeam: аудит сайтов из Excel", padding=12, style="Card.TLabelframe")
+        source.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        source.columnconfigure(1, weight=1)
+
+        ttk.Label(source, text="Входной Excel", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(source, textvariable=self.adbeam_input_path_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(source, text="Выбрать файл", command=self._choose_adbeam_input_file, style="Secondary.TButton").grid(row=0, column=2, pady=4)
+
+        ttk.Label(source, text="Итоговый Excel", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(source, textvariable=self.adbeam_output_path_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(source, text="Выбрать", command=self._choose_adbeam_output_file, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+
+        actions = ttk.Frame(source)
+        actions.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        for index in range(4):
+            actions.columnconfigure(index, weight=1)
+        ttk.Button(
+            actions,
+            text="Проверить Excel",
+            command=lambda: self._run_in_thread(self._action_adbeam_analyze, task_name="AdBeam анализ Excel"),
+            style="Secondary.TButton",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(
+            actions,
+            text="Начать аудит и сохранить",
+            command=lambda: self._run_in_thread(self._action_adbeam_audit, task_name="AdBeam аудит сайтов"),
+            style="Primary.TButton",
+        ).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(actions, text="Открыть итоговый Excel", command=self._open_adbeam_output_file, style="Secondary.TButton").grid(row=0, column=2, sticky="ew", padx=6)
+        ttk.Button(actions, text="Очистить вывод", command=self._clear_adbeam_output, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=(6, 0))
+
+        summary = ttk.LabelFrame(frame, text="Статус", padding=12, style="Card.TLabelframe")
+        summary.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        summary.columnconfigure(0, weight=1)
+        ttk.Label(summary, textvariable=self.adbeam_summary_var, style="Body.TLabel", justify="left").grid(row=0, column=0, sticky="ew")
+        ttk.Label(summary, textvariable=self.adbeam_progress_var, style="Muted.TLabel", justify="left").grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        output = ttk.LabelFrame(frame, text="JSON-результат", padding=12, style="Card.TLabelframe")
+        output.grid(row=2, column=0, sticky="nsew")
+        output.columnconfigure(0, weight=1)
+        output.rowconfigure(0, weight=1)
+        self.adbeam_output_text = tk.Text(
+            output,
+            wrap="word",
+            bg="#ffffff",
+            fg="#1f2a37",
+            insertbackground="#1f2a37",
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="#dbe4f0",
+            relief="solid",
+            font=("Consolas", 10),
+        )
+        self.adbeam_output_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(output, orient="vertical", command=self.adbeam_output_text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.adbeam_output_text.configure(yscrollcommand=scrollbar.set)
+        return frame
     def _build_source_block(self, parent):
         frame = ttk.LabelFrame(parent, text="1. Источник данных и анализ книги", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(1, weight=1)
@@ -466,6 +540,8 @@ class App:
         self._tracked_vars = [
             self.input_path_var,
             self.sample_output_var,
+            self.adbeam_input_path_var,
+            self.adbeam_output_path_var,
             self.artifacts_dir_var,
             self.profile_dir_var,
             self.limit_var,
@@ -523,6 +599,8 @@ class App:
         for key, var in {
             "input_path": self.input_path_var,
             "sample_output": self.sample_output_var,
+            "adbeam_input_path": self.adbeam_input_path_var,
+            "adbeam_output_path": self.adbeam_output_path_var,
             "artifacts_dir": self.artifacts_dir_var,
             "profile_dir": self.profile_dir_var,
             "limit": self.limit_var,
@@ -553,6 +631,9 @@ class App:
         registry_summary = settings.get("registry_summary")
         if isinstance(registry_summary, str) and registry_summary:
             self.registry_summary_var.set(registry_summary)
+        adbeam_summary = settings.get("adbeam_summary")
+        if isinstance(adbeam_summary, str) and adbeam_summary:
+            self.adbeam_summary_var.set(adbeam_summary)
         registry_batch_files = settings.get("registry_batch_files")
         if isinstance(registry_batch_files, list):
             self._registry_batch_files = [str(path) for path in registry_batch_files]
@@ -563,6 +644,9 @@ class App:
             data = {
                 "input_path": self.input_path_var.get().strip(),
                 "sample_output": self.sample_output_var.get().strip(),
+                "adbeam_input_path": self.adbeam_input_path_var.get().strip(),
+                "adbeam_output_path": self.adbeam_output_path_var.get().strip(),
+                "adbeam_summary": self.adbeam_summary_var.get(),
                 "artifacts_dir": self.artifacts_dir_var.get().strip(),
                 "profile_dir": self.profile_dir_var.get().strip(),
                 "limit": self.limit_var.get().strip(),
@@ -600,6 +684,28 @@ class App:
             self.selection_summary_var.set("Выбор листов: все валидные после анализа")
             self._save_settings()
 
+    def _choose_adbeam_input_file(self) -> None:
+        path = filedialog.askopenfilename(title="Выбери Excel-файл для AdBeam", filetypes=[("Excel", "*.xlsx")])
+        if path:
+            input_path = Path(path)
+            self.adbeam_input_path_var.set(str(input_path))
+            if not self.adbeam_output_path_var.get().strip():
+                self.adbeam_output_path_var.set(str(build_output_path(input_path)))
+            self.adbeam_summary_var.set("Файл выбран. Можно проверить Excel или запустить аудит сайтов.")
+            self.adbeam_progress_var.set("Ожидание запуска")
+            self._save_settings()
+
+    def _choose_adbeam_output_file(self) -> None:
+        current = self.adbeam_output_path_var.get().strip()
+        initialfile = Path(current).name if current else "adbeam_audited.xlsx"
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить AdBeam audited Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=initialfile,
+        )
+        if path:
+            self.adbeam_output_path_var.set(path)
     def _choose_sample_output(self) -> None:
         path = filedialog.asksaveasfilename(
             title="Куда сохранить research sample",
@@ -747,6 +853,18 @@ class App:
             raise FileNotFoundError(f"Не найден файл: {path}")
         os.startfile(path)  # type: ignore[attr-defined]
 
+    def _open_adbeam_output_file(self) -> None:
+        path = Path(self.adbeam_output_path_var.get().strip())
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден итоговый AdBeam Excel: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _clear_adbeam_output(self) -> None:
+        self.adbeam_output_path_var.set("")
+        self.adbeam_summary_var.set("AdBeam аудит ещё не запускался")
+        self.adbeam_progress_var.set("Ожидание Excel-файла для аудита сайтов")
+        if hasattr(self, "adbeam_output_text"):
+            self.adbeam_output_text.delete("1.0", "end")
     @staticmethod
     def _open_dir(path_str: str) -> None:
         path = Path(path_str)
@@ -803,6 +921,12 @@ class App:
         if success and self.progress_value_var.get() < 100:
             self.progress_value_var.set(100)
 
+    def _set_adbeam_progress_ui(self, title: str, detail: str, percent: float) -> None:
+        self.adbeam_progress_var.set(f"{title}\n{detail}")
+        self.progress_text_var.set(title)
+        self.progress_detail_var.set(detail)
+        self.progress_percent_var.set(f"{percent:.1f}%")
+        self.progress_value_var.set(percent)
     def _set_batch_progress(self, done: int, total: int, row_number: int | None = None, seller: str | None = None) -> None:
         self._progress_done = done
         self._progress_total = total
@@ -829,6 +953,50 @@ class App:
         self.progress_percent_var.set(f"{percent:.1f}%")
         self.progress_value_var.set(percent)
 
+    def _action_adbeam_analyze(self) -> None:
+        input_path = self._require_adbeam_input_path()
+        summary = read_excel_summary(input_path)
+        output_text = summary.model_dump_json(indent=2, exclude_none=True)
+        self.root.after(0, lambda output_text=output_text: self._set_adbeam_output(output_text))
+        self.root.after(0, lambda summary=summary: self.adbeam_summary_var.set(
+            f"Лист: {summary.sheet_name} | строк: {summary.total_rows} | сайтов найдено: {summary.rows_with_websites}"
+        ))
+        self.root.after(0, lambda: self.adbeam_progress_var.set("Проверка Excel завершена"))
+        self._append_log(
+            f"AdBeam analyze: sheet={summary.sheet_name}, rows={summary.total_rows}, websites={summary.rows_with_websites}\n"
+        )
+
+    def _action_adbeam_audit(self) -> None:
+        input_path = self._require_adbeam_input_path()
+        raw_output_path = self.adbeam_output_path_var.get().strip()
+        output_path = Path(raw_output_path) if raw_output_path else build_output_path(input_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        summary = run_excel_audit(input_path, progress_callback=self._on_adbeam_progress)
+        saved_path = export_audit_to_excel(input_path, summary, output_file_path=output_path)
+        attach_output_file_path(summary, saved_path)
+
+        output_text = summary.model_dump_json(indent=2, exclude_none=True)
+        counts = ", ".join(f"{key}: {value}" for key, value in sorted(summary.status_counts.items())) or "нет результатов"
+        self.root.after(0, lambda output_text=output_text: self._set_adbeam_output(output_text))
+        self.root.after(0, lambda saved_path=saved_path: self.adbeam_output_path_var.set(str(saved_path)))
+        self.root.after(0, lambda summary=summary, counts=counts: self.adbeam_summary_var.set(
+            f"Проверено сайтов: {summary.audited_rows}\nСтатусы: {counts}\nИтоговый файл: {summary.output_file_path}"
+        ))
+        self.root.after(0, lambda: self.adbeam_progress_var.set("Аудит завершён"))
+        self._append_log(f"AdBeam audit: checked={summary.audited_rows}, output={saved_path}\n")
+        self.root.after(0, lambda saved_path=saved_path: messagebox.showinfo("AdBeam аудит завершён", f"Итоговый Excel сохранён:\n{saved_path}"))
+
+    def _on_adbeam_progress(self, current: int, total: int, website: str) -> None:
+        safe_total = max(total, 1)
+        percent = min(current / safe_total * 100.0, 100.0)
+        title = f"AdBeam аудит: {current}/{total} сайтов"
+        detail = f"Текущий сайт: {website}"
+        self.root.after(0, lambda title=title, detail=detail, percent=percent: self._set_adbeam_progress_ui(title, detail, percent))
+
+    def _set_adbeam_output(self, text: str) -> None:
+        self.adbeam_output_text.delete("1.0", "end")
+        self.adbeam_output_text.insert("1.0", text)
     def _action_analyze(self) -> None:
         input_path = self._require_input_path()
         summary = analyze_workbook(input_path)
@@ -1071,6 +1239,14 @@ class App:
         self._append_log(f"Merge Compass: создан файл {output_path}\n")
         self.root.after(0, lambda: messagebox.showinfo("Merge Compass завершён", f"Итоговый enriched Excel сохранён:\n{output_path}"))
 
+    def _require_adbeam_input_path(self) -> Path:
+        input_value = self.adbeam_input_path_var.get().strip()
+        if not input_value:
+            raise ValueError("Сначала выбери Excel-файл во вкладке AdBeam")
+        input_path = Path(input_value)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Файл не найден: {input_path}")
+        return input_path
     def _require_input_path(self) -> Path:
         input_value = self.input_path_var.get().strip()
         if not input_value:

@@ -1,6 +1,9 @@
 {
   "input_path": "C:/Users/Пользователь/Desktop/AdBeam/тест_парсер/Результаты/Электроника/Игровая техника/2026-03-14—2026-04-12_FBO_Новинки_и_старые_Электроника_Игровая_техника_Видеокарты_Видеокарты.xlsx",
   "sample_output": "C:/Users/Пользователь/Desktop/AdBeam/тест_парсер/Результаты/Электроника/Игровая техника/research_sample.xlsx",
+  "adbeam_input_path": "C:\\dev\\prod\\adbeam_wb_marketguru_parser\\output\\final_enriched.xlsx",
+  "adbeam_output_path": "C:\\dev\\prod\\adbeam_wb_marketguru_parser\\output\\final_enriched_audited.xlsx",
+  "adbeam_summary": "Проверено сайтов: 5\nСтатусы: BROKEN: 2, FIT_LATER: 2, FIT_NOW: 1\nИтоговый файл: C:\\dev\\prod\\adbeam_wb_marketguru_parser\\output\\final_enriched_audited.xlsx",
   "artifacts_dir": "output\\artifacts",
   "profile_dir": "output\\wb_profile",
   "limit": "",
