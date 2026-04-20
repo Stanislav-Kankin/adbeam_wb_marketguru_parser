@@ -781,6 +781,95 @@ def update_inn_registry_from_batch_files(
     }
 
 
+def merge_inn_registry_files(
+    primary_registry_path: Path,
+    secondary_registry_path: Path,
+    output_path: Path,
+) -> dict[str, Any]:
+    if not primary_registry_path.exists():
+        raise FileNotFoundError(f"Не найден главный реестр: {primary_registry_path}")
+    if not secondary_registry_path.exists():
+        raise FileNotFoundError(f"Не найден второй реестр: {secondary_registry_path}")
+    if primary_registry_path.resolve() == secondary_registry_path.resolve():
+        raise ValueError("Для объединения нужны два разных файла реестра")
+
+    primary_rows, primary_import_rows = _read_inn_registry_payload(primary_registry_path)
+    secondary_rows, secondary_import_rows = _read_inn_registry_payload(secondary_registry_path)
+
+    merged_rows: list[dict[str, Any]] = []
+    merged_by_inn: dict[str, dict[str, Any]] = {}
+
+    primary_unique_inn = 0
+    primary_duplicates = 0
+    primary_skipped_without_inn = 0
+
+    for row in primary_rows:
+        normalized_row = _normalize_registry_row(row)
+        normalized_inn = normalized_row.get("inn")
+        if not normalized_inn:
+            primary_skipped_without_inn += 1
+            continue
+        if normalized_inn in merged_by_inn:
+            primary_duplicates += 1
+            continue
+        merged_rows.append(normalized_row)
+        merged_by_inn[normalized_inn] = normalized_row
+        primary_unique_inn += 1
+
+    secondary_unique_seen: set[str] = set()
+    secondary_duplicates = 0
+    secondary_skipped_without_inn = 0
+    overlaps_with_primary = 0
+    added_from_secondary = 0
+
+    for row in secondary_rows:
+        normalized_row = _normalize_registry_row(row)
+        normalized_inn = normalized_row.get("inn")
+        if not normalized_inn:
+            secondary_skipped_without_inn += 1
+            continue
+        if normalized_inn in secondary_unique_seen:
+            secondary_duplicates += 1
+            continue
+        secondary_unique_seen.add(normalized_inn)
+
+        if normalized_inn in merged_by_inn:
+            overlaps_with_primary += 1
+            continue
+
+        merged_rows.append(normalized_row)
+        merged_by_inn[normalized_inn] = normalized_row
+        added_from_secondary += 1
+
+    merged_import_rows = [
+        _normalize_import_row(row) for row in primary_import_rows if not _is_effectively_empty_row(row.values())
+    ]
+    merged_import_rows.extend(
+        _normalize_import_row(row) for row in secondary_import_rows if not _is_effectively_empty_row(row.values())
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_inn_registry_workbook(output_path, merged_rows, merged_import_rows)
+
+    return {
+        "primary_registry_path": str(primary_registry_path),
+        "secondary_registry_path": str(secondary_registry_path),
+        "output_path": str(output_path),
+        "primary_rows_total": len(primary_rows),
+        "secondary_rows_total": len(secondary_rows),
+        "primary_unique_inn": primary_unique_inn,
+        "secondary_unique_inn": len(secondary_unique_seen),
+        "primary_duplicates": primary_duplicates,
+        "secondary_duplicates": secondary_duplicates,
+        "primary_skipped_without_inn": primary_skipped_without_inn,
+        "secondary_skipped_without_inn": secondary_skipped_without_inn,
+        "overlaps_with_primary": overlaps_with_primary,
+        "added_from_secondary": added_from_secondary,
+        "merged_registry_rows": len(merged_rows),
+        "imports_rows": len(merged_import_rows),
+    }
+
+
 def discover_batch_results(root_dir: Path) -> list[Path]:
     if root_dir.is_file():
         return [root_dir] if _is_batch_results_filename(root_dir) else []
@@ -869,6 +958,17 @@ def _build_registry_row(
         "last_seen_at": imported_at,
         "last_source_batch": str(batch_path),
     }
+
+
+def _normalize_registry_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized_row = {header: row.get(header) for header in INN_REGISTRY_HEADERS}
+    normalized_row["inn"] = _normalize_inn_value(normalized_row.get("inn"))
+    normalized_row["seen_count"] = _coerce_int(normalized_row.get("seen_count"), default=1)
+    return normalized_row
+
+
+def _normalize_import_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {header: row.get(header) for header in INN_IMPORT_HEADERS}
 
 
 def _write_inn_registry_workbook(

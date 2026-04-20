@@ -7,6 +7,7 @@ from pathlib import Path
 from .excel_io import (
     analyze_workbook,
     extract_research_rows,
+    merge_inn_registry_files,
     merge_batch_results_with_compass,
     export_batch_no_inn,
     export_compass_unmatched,
@@ -59,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge_parser = subparsers.add_parser("merge-compass", help="Склеить batch_results.xlsx с выгрузкой Compass по ИНН")
 
     export_inn_parser = subparsers.add_parser("export-inn", help="Экспортировать уникальные ИНН из batch_results.xlsx для Compass")
+    merge_registry_parser = subparsers.add_parser("merge-registries", help="Объединить 2 реестра ИНН с приоритетом первого")
     export_inn_parser.add_argument("--batch-results", required=True, type=Path)
     export_inn_parser.add_argument("--output", type=Path, default=Path("output/inn_for_compass.xlsx"))
 
@@ -72,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     merge_parser.add_argument("--batch-results", required=True, type=Path)
     merge_parser.add_argument("--compass", required=True, type=Path)
     merge_parser.add_argument("--output", type=Path, default=Path("output/final_enriched.xlsx"))
+    merge_registry_parser.add_argument("--primary-registry", required=True, type=Path)
+    merge_registry_parser.add_argument("--secondary-registry", required=True, type=Path)
+    merge_registry_parser.add_argument("--output", type=Path, default=Path("output/inn_registry_merged.xlsx"))
 
     return parser
 
@@ -204,6 +209,15 @@ def main() -> None:
         summary = merge_batch_results_with_compass(
             batch_results_path=args.batch_results,
             compass_path=args.compass,
+            output_path=args.output,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "merge-registries":
+        summary = merge_inn_registry_files(
+            primary_registry_path=args.primary_registry,
+            secondary_registry_path=args.secondary_registry,
             output_path=args.output,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))

@@ -16,7 +16,7 @@ PLAYWRIGHT_TIMEOUT_SECONDS = 45.0
 PLAYWRIGHT_SETTLE_SECONDS = 8.0
 MAX_PAGES_PER_SITE = 6
 MAX_CRAWL_CANDIDATES = 16
-TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
+TLD_EXTRACTOR = tldextract.TLDExtract(cache_dir=None, suffix_list_urls=())
 BLOCKED_HTTP_STATUSES = (403, 429, 498, 503)
 DEFAULT_HEADERS = {
     "User-Agent": (

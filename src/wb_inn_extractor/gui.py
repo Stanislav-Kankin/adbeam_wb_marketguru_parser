@@ -19,6 +19,7 @@ from .excel_io import (
     analyze_workbook,
     discover_batch_results,
     extract_research_rows,
+    merge_inn_registry_files,
     read_research_row,
     read_research_rows_range,
     merge_batch_results_with_compass,
@@ -54,6 +55,9 @@ class App:
         self.enriched_output_var = tk.StringVar(value=str(Path("output/final_enriched.xlsx")))
         self.registry_path_var = tk.StringVar(value=str(Path("output/inn_registry.xlsx")))
         self.registry_new_inn_output_var = tk.StringVar(value=str(Path("output/new_inn_for_kontur.xlsx")))
+        self.registry_merge_primary_var = tk.StringVar(value=str(Path("output/inn_registry.xlsx")))
+        self.registry_merge_secondary_var = tk.StringVar()
+        self.registry_merge_output_var = tk.StringVar(value=str(Path("output/inn_registry_merged.xlsx")))
         self.registry_summary_var = tk.StringVar(value="Реестр ещё не обновлялся")
         self.headful_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Готово")
@@ -409,7 +413,7 @@ class App:
     def _build_registry_tab(self, parent):
         frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
+        frame.rowconfigure(2, weight=1)
 
         settings = ttk.LabelFrame(frame, text="Реестр ИНН", padding=12, style="Card.TLabelframe")
         settings.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -431,8 +435,49 @@ class App:
             justify="left",
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
+        merge_registry = ttk.LabelFrame(frame, text="Объединение 2 реестров", padding=12, style="Card.TLabelframe")
+        merge_registry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        merge_registry.columnconfigure(1, weight=1)
+
+        ttk.Label(merge_registry, text="Главный реестр", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(merge_registry, textvariable=self.registry_merge_primary_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(merge_registry, text="Выбрать", command=self._choose_registry_merge_primary, style="Secondary.TButton").grid(row=0, column=2, pady=4)
+
+        ttk.Label(merge_registry, text="Второй реестр", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(merge_registry, textvariable=self.registry_merge_secondary_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(merge_registry, text="Выбрать", command=self._choose_registry_merge_secondary, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+
+        ttk.Label(merge_registry, text="Итоговый реестр", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(merge_registry, textvariable=self.registry_merge_output_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(merge_registry, text="Выбрать", command=self._choose_registry_merge_output, style="Secondary.TButton").grid(row=2, column=2, pady=4)
+
+        ttk.Label(
+            merge_registry,
+            text="Если ИНН есть в обоих файлах, остаётся строка из первого реестра. Второй файл добавляет только новые ИНН.",
+            style="Muted.TLabel",
+            wraplength=900,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        merge_actions = ttk.Frame(merge_registry)
+        merge_actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        merge_actions.columnconfigure(0, weight=1)
+        merge_actions.columnconfigure(1, weight=1)
+        ttk.Button(
+            merge_actions,
+            text="Объединить реестры",
+            command=lambda: self._run_in_thread(self._action_merge_registries, task_name="Объединение реестров ИНН"),
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(
+            merge_actions,
+            text="Открыть итоговый реестр",
+            command=self._open_registry_merge_output,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
         files = ttk.LabelFrame(frame, text="Batch-файлы для импорта", padding=12, style="Card.TLabelframe")
-        files.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        files.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         files.columnconfigure(0, weight=1)
         files.rowconfigure(0, weight=1)
 
@@ -465,7 +510,7 @@ class App:
         ttk.Button(file_buttons, text="Очистить список", command=self._clear_registry_batch_files, style="Secondary.TButton").grid(row=2, column=0, sticky="ew", pady=8)
 
         actions = ttk.Frame(frame)
-        actions.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        actions.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         for index in range(4):
             actions.columnconfigure(index, weight=1)
         ttk.Button(
@@ -479,7 +524,7 @@ class App:
         ttk.Button(actions, text="Взять текущий batch", command=self._use_current_batch_for_registry, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=(6, 0))
 
         summary = ttk.LabelFrame(frame, text="Сводка", padding=12, style="Card.TLabelframe")
-        summary.grid(row=3, column=0, sticky="ew")
+        summary.grid(row=4, column=0, sticky="ew")
         summary.columnconfigure(0, weight=1)
         ttk.Label(summary, textvariable=self.registry_summary_var, style="Body.TLabel", justify="left").grid(row=0, column=0, sticky="ew")
         return frame
@@ -553,6 +598,9 @@ class App:
             self.enriched_output_var,
             self.registry_path_var,
             self.registry_new_inn_output_var,
+            self.registry_merge_primary_var,
+            self.registry_merge_secondary_var,
+            self.registry_merge_output_var,
             self.sheet_mode_var,
         ]
         for var in self._tracked_vars:
@@ -564,6 +612,12 @@ class App:
         path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
         if not path.exists():
             raise FileNotFoundError(f"Не найден реестр ИНН: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _open_registry_merge_output(self) -> None:
+        path = Path(self.registry_merge_output_var.get().strip() or "output/inn_registry_merged.xlsx")
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден итоговый реестр: {path}")
         os.startfile(path)  # type: ignore[attr-defined]
 
     def _open_registry_new_inn(self) -> None:
@@ -612,6 +666,9 @@ class App:
             "enriched_output": self.enriched_output_var,
             "registry_path": self.registry_path_var,
             "registry_new_inn_output": self.registry_new_inn_output_var,
+            "registry_merge_primary": self.registry_merge_primary_var,
+            "registry_merge_secondary": self.registry_merge_secondary_var,
+            "registry_merge_output": self.registry_merge_output_var,
             "sheet_mode": self.sheet_mode_var,
         }.items():
             value = settings.get(key)
@@ -658,6 +715,9 @@ class App:
                 "enriched_output": self.enriched_output_var.get().strip(),
                 "registry_path": self.registry_path_var.get().strip(),
                 "registry_new_inn_output": self.registry_new_inn_output_var.get().strip(),
+                "registry_merge_primary": self.registry_merge_primary_var.get().strip(),
+                "registry_merge_secondary": self.registry_merge_secondary_var.get().strip(),
+                "registry_merge_output": self.registry_merge_output_var.get().strip(),
                 "registry_batch_files": list(self._registry_batch_files),
                 "registry_summary": self.registry_summary_var.get(),
                 "sheet_mode": self.sheet_mode_var.get(),
@@ -778,6 +838,32 @@ class App:
         )
         if path:
             self.registry_new_inn_output_var.set(path)
+
+    def _choose_registry_merge_primary(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Выбери главный реестр ИНН",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xls")],
+        )
+        if path:
+            self.registry_merge_primary_var.set(path)
+
+    def _choose_registry_merge_secondary(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Выбери второй реестр ИНН",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xls")],
+        )
+        if path:
+            self.registry_merge_secondary_var.set(path)
+
+    def _choose_registry_merge_output(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить объединённый реестр",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=Path(self.registry_merge_output_var.get()).name,
+        )
+        if path:
+            self.registry_merge_output_var.set(path)
 
     def _add_registry_batch_files(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -1163,6 +1249,42 @@ class App:
             "Batch завершён. Добавить этот batch_results.xlsx во вкладку Реестр ИНН?",
         ):
             self._add_registry_batch_paths([batch_output])
+
+    def _action_merge_registries(self) -> None:
+        primary_registry_path = Path(self.registry_merge_primary_var.get().strip() or self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
+        secondary_registry_value = self.registry_merge_secondary_var.get().strip()
+        if not secondary_registry_value:
+            raise ValueError("Сначала выбери второй реестр ИНН")
+        secondary_registry_path = Path(secondary_registry_value)
+        output_path = Path(self.registry_merge_output_var.get().strip() or "output/inn_registry_merged.xlsx")
+
+        self._append_log(f"Registry Merge: primary={primary_registry_path}\n")
+        self._append_log(f"Registry Merge: secondary={secondary_registry_path}\n")
+        self._append_log(f"Registry Merge: output={output_path}\n")
+
+        summary = merge_inn_registry_files(
+            primary_registry_path=primary_registry_path,
+            secondary_registry_path=secondary_registry_path,
+            output_path=output_path,
+        )
+
+        text = (
+            f"Главный реестр: {summary['primary_registry_path']}\n"
+            f"Второй реестр: {summary['secondary_registry_path']}\n"
+            f"Строк в первом: {summary['primary_rows_total']}\n"
+            f"Уникальных ИНН в первом: {summary['primary_unique_inn']}\n"
+            f"Строк во втором: {summary['secondary_rows_total']}\n"
+            f"Уникальных ИНН во втором: {summary['secondary_unique_inn']}\n"
+            f"Совпадений по ИНН: {summary['overlaps_with_primary']}\n"
+            f"Добавлено из второго: {summary['added_from_secondary']}\n"
+            f"Итоговых ИНН: {summary['merged_registry_rows']}\n"
+            f"Итоговый реестр: {summary['output_path']}"
+        )
+        self.registry_summary_var.set(text)
+        self._append_log("Registry Merge: объединение завершено\n")
+        self._append_log(text + "\n")
+        self._save_settings()
+        self.root.after(0, lambda: messagebox.showinfo("Реестры объединены", text))
 
     def _action_update_registry(self) -> None:
         if not self._registry_batch_files:
