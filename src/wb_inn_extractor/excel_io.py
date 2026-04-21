@@ -60,6 +60,55 @@ INN_IMPORT_HEADERS = [
     "skipped_without_inn",
 ]
 
+SELLER_HISTORY_HEADERS = [
+    "seller_key",
+    "first_seller_name_raw",
+    "last_seller_name_raw",
+    "seller_display_name",
+    "seller_url",
+    "entity_type",
+    "inn",
+    "ogrn",
+    "ogrnip",
+    "first_parse_status",
+    "last_parse_status",
+    "first_note",
+    "last_note",
+    "skip_recommended",
+    "seen_count",
+    "first_seen_at",
+    "last_seen_at",
+    "first_source_batch",
+    "last_source_batch",
+    "first_category",
+    "last_category",
+]
+
+SELLER_HISTORY_IMPORT_HEADERS = [
+    "imported_at",
+    "source_batch_file",
+    "category",
+    "rows_total",
+    "rows_with_seller",
+    "unique_seller_in_file",
+    "new_seller_added",
+    "already_known",
+    "duplicate_in_file",
+    "skipped_without_seller",
+    "skip_recommended_in_file",
+]
+
+SELLER_HISTORY_SKIP_STATUSES = {
+    "SUCCESS",
+    "PARTIAL_SUCCESS",
+    "PAGE_OPENED_NO_REQUISITES",
+    "Нет реквизитов на странице",
+    "БЕЛОРУСЬ",
+    "КАЗАХСТАН",
+    "SKIPPED_KNOWN_SELLER",
+    "SKIPPED_VIEWED_SELLER",
+}
+
 BATCH_RESULTS_REQUIRED_HEADERS = {
     "inn",
     "seller_name_raw",
@@ -125,6 +174,7 @@ def extract_research_rows(
     input_path: Path,
     limit: int | None = None,
     selected_sheets: list[str] | None = None,
+    excluded_seller_keys: set[str] | None = None,
 ) -> list[ResearchRow]:
     workbook = load_workbook(input_path, read_only=True, data_only=True)
     sheet_names = _normalize_sheet_selection(workbook.sheetnames, selected_sheets)
@@ -154,6 +204,8 @@ def extract_research_rows(
             seller_key = _normalize_key_part(seller_raw)
             if seller_key:
                 if seller_key in seen_sellers:
+                    continue
+                if excluded_seller_keys and seller_key in excluded_seller_keys:
                     continue
                 seen_sellers.add(seller_key)
 
@@ -781,6 +833,248 @@ def update_inn_registry_from_batch_files(
     }
 
 
+def update_seller_history_from_batch_files(
+    batch_results_paths: list[Path],
+    history_path: Path,
+) -> dict[str, Any]:
+    imported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history_rows, import_rows = _read_seller_history_payload(history_path)
+    history_by_key: dict[str, dict[str, Any]] = {}
+    for row in history_rows:
+        normalized_row = _normalize_seller_history_row(row)
+        seller_key = normalized_row.get("seller_key")
+        if seller_key:
+            history_by_key.setdefault(seller_key, normalized_row)
+
+    total_rows = 0
+    rows_with_seller = 0
+    skipped_without_seller = 0
+    already_known = 0
+    duplicate_in_import = 0
+    skip_recommended_total = 0
+    new_rows: list[dict[str, Any]] = []
+    per_file_summaries: list[dict[str, Any]] = []
+
+    for batch_path in batch_results_paths:
+        _validate_batch_results_file(batch_path)
+        batch_rows = _read_sheet_as_dicts(batch_path)
+        category = _infer_category_from_batch_path(batch_path)
+        file_rows_total = len(batch_rows)
+        file_rows_with_seller = 0
+        file_new = 0
+        file_known = 0
+        file_duplicates = 0
+        file_skipped_without_seller = 0
+        file_skip_recommended = 0
+        seen_in_file: set[str] = set()
+
+        for row in batch_rows:
+            total_rows += 1
+            seller_key = _extract_batch_seller_key(row)
+            if not seller_key:
+                skipped_without_seller += 1
+                file_skipped_without_seller += 1
+                continue
+
+            rows_with_seller += 1
+            file_rows_with_seller += 1
+
+            if seller_key in seen_in_file:
+                duplicate_in_import += 1
+                file_duplicates += 1
+                continue
+            seen_in_file.add(seller_key)
+
+            skip_recommended = _is_seller_history_skip_candidate(row)
+            if skip_recommended:
+                skip_recommended_total += 1
+                file_skip_recommended += 1
+
+            existing = history_by_key.get(seller_key)
+            if existing is not None:
+                already_known += 1
+                file_known += 1
+                _merge_seller_history_row(
+                    existing=existing,
+                    source_row=row,
+                    source_path=batch_path,
+                    category=category,
+                    imported_at=imported_at,
+                    skip_recommended=skip_recommended,
+                )
+                continue
+
+            history_row = _build_seller_history_row(
+                seller_key=seller_key,
+                source_row=row,
+                source_path=batch_path,
+                category=category,
+                imported_at=imported_at,
+                skip_recommended=skip_recommended,
+            )
+            history_rows.append(history_row)
+            history_by_key[seller_key] = history_row
+            new_rows.append(history_row)
+            file_new += 1
+
+        file_summary = {
+            "source_batch_file": str(batch_path),
+            "category": category,
+            "rows_total": file_rows_total,
+            "rows_with_seller": file_rows_with_seller,
+            "unique_seller_in_file": len(seen_in_file),
+            "new_seller_added": file_new,
+            "already_known": file_known,
+            "duplicate_in_file": file_duplicates,
+            "skipped_without_seller": file_skipped_without_seller,
+            "skip_recommended_in_file": file_skip_recommended,
+        }
+        per_file_summaries.append(file_summary)
+        import_rows.append({
+            "imported_at": imported_at,
+            **file_summary,
+        })
+
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_seller_history_workbook(history_path, history_rows, import_rows)
+
+    return {
+        "batch_files": len(batch_results_paths),
+        "rows_total": total_rows,
+        "rows_with_seller": rows_with_seller,
+        "history_rows": len(history_by_key),
+        "new_seller_added": len(new_rows),
+        "already_known": already_known,
+        "duplicate_in_import": duplicate_in_import,
+        "skipped_without_seller": skipped_without_seller,
+        "skip_recommended_total": skip_recommended_total,
+        "history_path": str(history_path),
+        "files": per_file_summaries,
+    }
+
+
+def import_seller_history_from_registry_files(
+    registry_paths: list[Path],
+    history_path: Path,
+) -> dict[str, Any]:
+    imported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history_rows, import_rows = _read_seller_history_payload(history_path)
+    history_by_key: dict[str, dict[str, Any]] = {}
+    for row in history_rows:
+        normalized_row = _normalize_seller_history_row(row)
+        seller_key = normalized_row.get("seller_key")
+        if seller_key:
+            history_by_key.setdefault(seller_key, normalized_row)
+
+    total_rows = 0
+    rows_with_seller = 0
+    skipped_without_seller = 0
+    already_known = 0
+    duplicate_in_import = 0
+    skip_recommended_total = 0
+    new_rows: list[dict[str, Any]] = []
+    per_file_summaries: list[dict[str, Any]] = []
+
+    for registry_path in registry_paths:
+        if not registry_path.exists():
+            raise FileNotFoundError(f"Не найден файл для импорта в историю sellers: {registry_path}")
+
+        source_rows, source_sheet_name = _read_seller_history_source_rows_from_registry_workbook(registry_path)
+        file_rows_total = len(source_rows)
+        file_rows_with_seller = 0
+        file_new = 0
+        file_known = 0
+        file_duplicates = 0
+        file_skipped_without_seller = 0
+        file_skip_recommended = 0
+        seen_in_file: set[str] = set()
+
+        for row in source_rows:
+            total_rows += 1
+            seller_key = _extract_batch_seller_key(row)
+            if not seller_key:
+                skipped_without_seller += 1
+                file_skipped_without_seller += 1
+                continue
+
+            rows_with_seller += 1
+            file_rows_with_seller += 1
+
+            if seller_key in seen_in_file:
+                duplicate_in_import += 1
+                file_duplicates += 1
+                continue
+            seen_in_file.add(seller_key)
+
+            row_category = _coerce_to_string(row.get("first_category")) or _coerce_to_string(row.get("last_category")) or source_sheet_name
+            skip_recommended = _is_seller_history_skip_candidate(row)
+            if skip_recommended:
+                skip_recommended_total += 1
+                file_skip_recommended += 1
+
+            existing = history_by_key.get(seller_key)
+            if existing is not None:
+                already_known += 1
+                file_known += 1
+                _merge_seller_history_row(
+                    existing=existing,
+                    source_row=row,
+                    source_path=registry_path,
+                    category=row_category,
+                    imported_at=imported_at,
+                    skip_recommended=skip_recommended,
+                )
+                continue
+
+            history_row = _build_seller_history_row(
+                seller_key=seller_key,
+                source_row=row,
+                source_path=registry_path,
+                category=row_category,
+                imported_at=imported_at,
+                skip_recommended=skip_recommended,
+            )
+            history_rows.append(history_row)
+            history_by_key[seller_key] = history_row
+            new_rows.append(history_row)
+            file_new += 1
+
+        file_summary = {
+            "source_batch_file": str(registry_path),
+            "category": source_sheet_name,
+            "rows_total": file_rows_total,
+            "rows_with_seller": file_rows_with_seller,
+            "unique_seller_in_file": len(seen_in_file),
+            "new_seller_added": file_new,
+            "already_known": file_known,
+            "duplicate_in_file": file_duplicates,
+            "skipped_without_seller": file_skipped_without_seller,
+            "skip_recommended_in_file": file_skip_recommended,
+        }
+        per_file_summaries.append(file_summary)
+        import_rows.append({
+            "imported_at": imported_at,
+            **file_summary,
+        })
+
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_seller_history_workbook(history_path, history_rows, import_rows)
+
+    return {
+        "source_files": len(registry_paths),
+        "rows_total": total_rows,
+        "rows_with_seller": rows_with_seller,
+        "history_rows": len(history_by_key),
+        "new_seller_added": len(new_rows),
+        "already_known": already_known,
+        "duplicate_in_import": duplicate_in_import,
+        "skipped_without_seller": skipped_without_seller,
+        "skip_recommended_total": skip_recommended_total,
+        "history_path": str(history_path),
+        "files": per_file_summaries,
+    }
+
+
 def merge_inn_registry_files(
     primary_registry_path: Path,
     secondary_registry_path: Path,
@@ -917,6 +1211,17 @@ def _read_inn_registry_payload(registry_path: Path) -> tuple[list[dict[str, Any]
     return registry_rows, import_rows
 
 
+def _read_seller_history_payload(history_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not history_path.exists():
+        return [], []
+
+    workbook = load_workbook(history_path, read_only=True, data_only=True)
+    history_sheet_name = "seller_history" if "seller_history" in workbook.sheetnames else workbook.sheetnames[0]
+    history_rows = _read_worksheet_as_dicts(workbook[history_sheet_name])
+    import_rows = _read_worksheet_as_dicts(workbook["imports"]) if "imports" in workbook.sheetnames else []
+    return history_rows, import_rows
+
+
 def _read_worksheet_as_dicts(sheet: Worksheet) -> list[dict[str, Any]]:
     rows_iter = sheet.iter_rows(values_only=True)
     try:
@@ -931,6 +1236,149 @@ def _read_worksheet_as_dicts(sheet: Worksheet) -> list[dict[str, Any]]:
             continue
         result.append(row_dict)
     return result
+
+
+def load_known_seller_keys_from_registry(registry_path: Path) -> set[str]:
+    return set(load_registry_seller_index(registry_path))
+
+
+def load_registry_seller_index(registry_path: Path) -> dict[str, dict[str, Any]]:
+    registry_rows, _ = _read_inn_registry_payload(registry_path)
+    seller_index: dict[str, dict[str, Any]] = {}
+    for row in registry_rows:
+        normalized_row = _normalize_registry_row(row)
+        for field_name in ("seller_name_raw", "seller_display_name"):
+            seller_key = _normalize_key_part(normalized_row.get(field_name))
+            if seller_key:
+                seller_index.setdefault(seller_key, normalized_row)
+    return seller_index
+
+
+def load_skip_seller_index_from_history(history_path: Path) -> dict[str, dict[str, Any]]:
+    history_rows, _ = _read_seller_history_payload(history_path)
+    seller_index: dict[str, dict[str, Any]] = {}
+    for row in history_rows:
+        normalized_row = _normalize_seller_history_row(row)
+        seller_key = normalized_row.get("seller_key")
+        if not seller_key or not _coerce_to_bool(normalized_row.get("skip_recommended")):
+            continue
+        seller_index.setdefault(seller_key, normalized_row)
+    return seller_index
+
+
+def load_known_seller_sources(
+    registry_path: Path | None = None,
+    seller_history_path: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    known_sources: dict[str, dict[str, Any]] = {}
+
+    if seller_history_path is not None and seller_history_path.exists():
+        for seller_key, row in load_skip_seller_index_from_history(seller_history_path).items():
+            known_sources.setdefault(seller_key, {
+                "source": "seller_history",
+                "path": seller_history_path,
+                "row": row,
+            })
+
+    if registry_path is not None and registry_path.exists():
+        for seller_key, row in load_registry_seller_index(registry_path).items():
+            known_sources[seller_key] = {
+                "source": "inn_registry",
+                "path": registry_path,
+                "row": row,
+            }
+
+    return known_sources
+
+
+def build_known_seller_batch_row(
+    row_number: int,
+    research_row: ResearchRow,
+    registry_row: dict[str, Any],
+    registry_path: Path,
+) -> dict[str, Any]:
+    seller_display_name = registry_row.get("seller_display_name") or research_row.seller_name_raw
+    seller_url = registry_row.get("seller_url")
+    return {
+        "row_number": row_number,
+        "source_sheet": research_row.source_sheet,
+        "source_row_index": research_row.source_row_index,
+        "product_name": research_row.product_name,
+        "wb_nm_id": research_row.wb_nm_id,
+        "brand": research_row.brand,
+        "seller_name_raw": research_row.seller_name_raw,
+        "wb_candidate_url": research_row.wb_candidate_url,
+        "final_url": seller_url,
+        "seller_url": seller_url,
+        "navigated_to_seller_page": False,
+        "seller_display_name": seller_display_name,
+        "entity_type": registry_row.get("entity_type"),
+        "inn": registry_row.get("inn"),
+        "ogrn": registry_row.get("ogrn"),
+        "ogrnip": registry_row.get("ogrnip"),
+        "parse_status": "SKIPPED_KNOWN_SELLER",
+        "parse_note": f"Продавец найден в реестре ИНН: {registry_path}",
+        "http_status": None,
+        "used_persistent_profile": False,
+        "screenshot_path": None,
+        "html_path": None,
+        "text_path": None,
+        "marketguru_source_sheet": research_row.source_sheet,
+        "marketguru_source_row_index": research_row.source_row_index,
+        "marketguru_product_name": research_row.product_name,
+        "marketguru_brand": research_row.brand,
+        "marketguru_seller_name": research_row.seller_name_raw,
+        "marketguru_wb_nm_id": research_row.wb_nm_id,
+        "marketguru_candidate_url": research_row.wb_candidate_url,
+        "wb_seller_name": seller_display_name,
+        "wb_seller_url": seller_url,
+    }
+
+
+def build_viewed_seller_batch_row(
+    row_number: int,
+    research_row: ResearchRow,
+    history_row: dict[str, Any],
+    history_path: Path,
+) -> dict[str, Any]:
+    seller_display_name = history_row.get("seller_display_name") or research_row.seller_name_raw
+    seller_url = history_row.get("seller_url")
+    last_status = history_row.get("last_parse_status")
+    note_suffix = f" Последний статус: {last_status}." if last_status else ""
+    return {
+        "row_number": row_number,
+        "source_sheet": research_row.source_sheet,
+        "source_row_index": research_row.source_row_index,
+        "product_name": research_row.product_name,
+        "wb_nm_id": research_row.wb_nm_id,
+        "brand": research_row.brand,
+        "seller_name_raw": research_row.seller_name_raw,
+        "wb_candidate_url": research_row.wb_candidate_url,
+        "final_url": seller_url,
+        "seller_url": seller_url,
+        "navigated_to_seller_page": False,
+        "seller_display_name": seller_display_name,
+        "entity_type": history_row.get("entity_type"),
+        "inn": history_row.get("inn"),
+        "ogrn": history_row.get("ogrn"),
+        "ogrnip": history_row.get("ogrnip"),
+        "parse_status": "SKIPPED_VIEWED_SELLER",
+        "parse_note": f"Продавец найден в истории просмотренных sellers: {history_path}.{note_suffix}".strip(),
+        "http_status": None,
+        "used_persistent_profile": False,
+        "screenshot_path": None,
+        "html_path": None,
+        "text_path": None,
+        "marketguru_source_sheet": research_row.source_sheet,
+        "marketguru_source_row_index": research_row.source_row_index,
+        "marketguru_product_name": research_row.product_name,
+        "marketguru_brand": research_row.brand,
+        "marketguru_seller_name": research_row.seller_name_raw,
+        "marketguru_wb_nm_id": research_row.wb_nm_id,
+        "marketguru_candidate_url": research_row.wb_candidate_url,
+        "wb_seller_name": seller_display_name,
+        "wb_seller_url": seller_url,
+    }
 
 
 def _build_registry_row(
@@ -971,6 +1419,186 @@ def _normalize_import_row(row: dict[str, Any]) -> dict[str, Any]:
     return {header: row.get(header) for header in INN_IMPORT_HEADERS}
 
 
+def _extract_batch_seller_key(batch_row: dict[str, Any]) -> str:
+    seller_value = (
+        batch_row.get("marketguru_seller_name")
+        or batch_row.get("seller_name_raw")
+        or batch_row.get("wb_seller_name")
+        or batch_row.get("first_seller_name_raw")
+        or batch_row.get("last_seller_name_raw")
+        or batch_row.get("seller_display_name")
+    )
+    return _normalize_key_part(seller_value)
+
+
+def _is_seller_history_skip_candidate(batch_row: dict[str, Any]) -> bool:
+    if _normalize_inn_value(batch_row.get("inn")):
+        return True
+    parse_status = _coerce_to_string(batch_row.get("parse_status"))
+    return bool(parse_status and parse_status in SELLER_HISTORY_SKIP_STATUSES)
+
+
+def _build_seller_history_row(
+    seller_key: str,
+    source_row: dict[str, Any],
+    source_path: Path,
+    category: str,
+    imported_at: str,
+    skip_recommended: bool,
+) -> dict[str, Any]:
+    seller_name_raw = (
+        source_row.get("marketguru_seller_name")
+        or source_row.get("seller_name_raw")
+        or source_row.get("last_seller_name_raw")
+        or source_row.get("first_seller_name_raw")
+    )
+    seller_display_name = source_row.get("wb_seller_name") or source_row.get("seller_display_name")
+    seller_url = source_row.get("wb_seller_url") or source_row.get("seller_url")
+    parse_status = (
+        source_row.get("parse_status")
+        or source_row.get("last_parse_status")
+        or source_row.get("first_parse_status")
+    )
+    note = (
+        source_row.get("parse_note")
+        or source_row.get("note")
+        or source_row.get("last_note")
+        or source_row.get("first_note")
+    )
+    first_seen_at = source_row.get("first_seen_at") or imported_at
+    last_seen_at = source_row.get("last_seen_at") or source_row.get("first_seen_at") or imported_at
+    first_source_batch = source_row.get("first_source_batch") or str(source_path)
+    last_source_batch = source_row.get("last_source_batch") or str(source_path)
+    first_category = source_row.get("first_category") or category
+    last_category = source_row.get("last_category") or source_row.get("first_category") or category
+    seen_count = max(_coerce_int(source_row.get("seen_count"), default=1), 1)
+    return {
+        "seller_key": seller_key,
+        "first_seller_name_raw": seller_name_raw,
+        "last_seller_name_raw": seller_name_raw,
+        "seller_display_name": seller_display_name,
+        "seller_url": seller_url,
+        "entity_type": source_row.get("entity_type"),
+        "inn": _normalize_inn_value(source_row.get("inn")),
+        "ogrn": source_row.get("ogrn"),
+        "ogrnip": source_row.get("ogrnip"),
+        "first_parse_status": parse_status,
+        "last_parse_status": parse_status,
+        "first_note": note,
+        "last_note": note,
+        "skip_recommended": skip_recommended,
+        "seen_count": seen_count,
+        "first_seen_at": first_seen_at,
+        "last_seen_at": last_seen_at,
+        "first_source_batch": first_source_batch,
+        "last_source_batch": last_source_batch,
+        "first_category": first_category,
+        "last_category": last_category,
+    }
+
+
+def _merge_seller_history_row(
+    existing: dict[str, Any],
+    source_row: dict[str, Any],
+    source_path: Path,
+    category: str,
+    imported_at: str,
+    skip_recommended: bool,
+) -> None:
+    source_seen_count = max(_coerce_int(source_row.get("seen_count"), default=1), 1)
+    seller_name_raw = (
+        source_row.get("marketguru_seller_name")
+        or source_row.get("seller_name_raw")
+        or source_row.get("last_seller_name_raw")
+        or source_row.get("first_seller_name_raw")
+    )
+    parse_status = (
+        source_row.get("parse_status")
+        or source_row.get("last_parse_status")
+        or source_row.get("first_parse_status")
+    )
+    note = (
+        source_row.get("parse_note")
+        or source_row.get("note")
+        or source_row.get("last_note")
+        or source_row.get("first_note")
+    )
+
+    existing["seen_count"] = _coerce_int(existing.get("seen_count"), default=1) + source_seen_count
+    existing["last_seen_at"] = source_row.get("last_seen_at") or source_row.get("first_seen_at") or imported_at
+    existing["last_source_batch"] = source_row.get("last_source_batch") or str(source_path)
+    existing["last_category"] = source_row.get("last_category") or source_row.get("first_category") or category
+    if seller_name_raw:
+        existing["last_seller_name_raw"] = seller_name_raw
+        if not existing.get("first_seller_name_raw"):
+            existing["first_seller_name_raw"] = seller_name_raw
+    if source_row.get("wb_seller_name") or source_row.get("seller_display_name"):
+        existing["seller_display_name"] = source_row.get("wb_seller_name") or source_row.get("seller_display_name")
+    if source_row.get("wb_seller_url") or source_row.get("seller_url"):
+        existing["seller_url"] = source_row.get("wb_seller_url") or source_row.get("seller_url")
+    if source_row.get("entity_type"):
+        existing["entity_type"] = source_row.get("entity_type")
+    normalized_inn = _normalize_inn_value(source_row.get("inn"))
+    if normalized_inn:
+        existing["inn"] = normalized_inn
+    if source_row.get("ogrn"):
+        existing["ogrn"] = source_row.get("ogrn")
+    if source_row.get("ogrnip"):
+        existing["ogrnip"] = source_row.get("ogrnip")
+    if parse_status:
+        existing["last_parse_status"] = parse_status
+        if not existing.get("first_parse_status"):
+            existing["first_parse_status"] = parse_status
+    if note:
+        existing["last_note"] = note
+        if not existing.get("first_note"):
+            existing["first_note"] = note
+    if not existing.get("first_seen_at"):
+        existing["first_seen_at"] = source_row.get("first_seen_at") or imported_at
+    if not existing.get("first_source_batch"):
+        existing["first_source_batch"] = source_row.get("first_source_batch") or str(source_path)
+    if not existing.get("first_category"):
+        existing["first_category"] = source_row.get("first_category") or category
+    existing["skip_recommended"] = _coerce_to_bool(existing.get("skip_recommended")) or skip_recommended
+
+
+def _read_seller_history_source_rows_from_registry_workbook(registry_path: Path) -> tuple[list[dict[str, Any]], str]:
+    workbook = load_workbook(registry_path, read_only=True, data_only=True)
+    preferred_sheet_names = [
+        sheet_name
+        for sheet_name in ("inn_registry", "final_enriched")
+        if sheet_name in workbook.sheetnames
+    ]
+    preferred_sheet_names.extend(
+        sheet_name for sheet_name in workbook.sheetnames if sheet_name not in preferred_sheet_names
+    )
+
+    for sheet_name in preferred_sheet_names:
+        rows = _read_worksheet_as_dicts(workbook[sheet_name])
+        if not rows:
+            continue
+        headers = set(rows[0])
+        if headers.intersection({"seller_name_raw", "marketguru_seller_name", "first_seller_name_raw", "last_seller_name_raw"}):
+            return rows, sheet_name
+
+    raise ValueError(
+        f"В файле {registry_path} не найден лист с seller-данными для импорта в историю sellers"
+    )
+
+
+def _normalize_seller_history_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized_row = {header: row.get(header) for header in SELLER_HISTORY_HEADERS}
+    normalized_row["seller_key"] = _normalize_key_part(normalized_row.get("seller_key"))
+    normalized_row["inn"] = _normalize_inn_value(normalized_row.get("inn"))
+    normalized_row["seen_count"] = _coerce_int(normalized_row.get("seen_count"), default=1)
+    normalized_row["skip_recommended"] = _coerce_to_bool(normalized_row.get("skip_recommended"))
+    return normalized_row
+
+
+def _normalize_seller_history_import_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {header: row.get(header) for header in SELLER_HISTORY_IMPORT_HEADERS}
+
+
 def _write_inn_registry_workbook(
     registry_path: Path,
     registry_rows: list[dict[str, Any]],
@@ -993,6 +1621,30 @@ def _write_inn_registry_workbook(
     workbook.save(registry_path)
 
 
+def _write_seller_history_workbook(
+    history_path: Path,
+    history_rows: list[dict[str, Any]],
+    import_rows: list[dict[str, Any]],
+) -> None:
+    workbook = Workbook()
+    history_sheet = workbook.active
+    history_sheet.title = "seller_history"
+    history_sheet.append(SELLER_HISTORY_HEADERS)
+    for row in history_rows:
+        normalized_row = _normalize_seller_history_row(row)
+        history_sheet.append([normalized_row.get(header) for header in SELLER_HISTORY_HEADERS])
+
+    imports_sheet = workbook.create_sheet("imports")
+    imports_sheet.append(SELLER_HISTORY_IMPORT_HEADERS)
+    for row in import_rows:
+        normalized_row = _normalize_seller_history_import_row(row)
+        imports_sheet.append([normalized_row.get(header) for header in SELLER_HISTORY_IMPORT_HEADERS])
+
+    _format_seller_history_sheet(history_sheet)
+    _format_seller_history_imports_sheet(imports_sheet)
+    workbook.save(history_path)
+
+
 def _format_registry_sheet(sheet: Worksheet) -> None:
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
@@ -1013,6 +1665,56 @@ def _format_registry_sheet(sheet: Worksheet) -> None:
         "N": 20,
         "O": 65,
         "P": 65,
+    }
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+
+
+def _format_seller_history_sheet(sheet: Worksheet) -> None:
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = {
+        "A": 30,
+        "B": 28,
+        "C": 28,
+        "D": 28,
+        "E": 40,
+        "F": 16,
+        "G": 16,
+        "H": 16,
+        "I": 18,
+        "J": 20,
+        "K": 20,
+        "L": 34,
+        "M": 34,
+        "N": 14,
+        "O": 12,
+        "P": 20,
+        "Q": 20,
+        "R": 60,
+        "S": 60,
+        "T": 28,
+        "U": 28,
+    }
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+
+
+def _format_seller_history_imports_sheet(sheet: Worksheet) -> None:
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = {
+        "A": 20,
+        "B": 65,
+        "C": 28,
+        "D": 12,
+        "E": 14,
+        "F": 16,
+        "G": 16,
+        "H": 16,
+        "I": 14,
+        "J": 18,
+        "K": 18,
     }
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width

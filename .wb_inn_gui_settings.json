@@ -14,6 +14,7 @@
   "compass_input": "C:/Users/Пользователь/Downloads/ТЕСТ  из списка 2026-04-16 10-39.xlsx",
   "enriched_output": "output\\final_enriched.xlsx",
   "registry_path": "output\\inn_r22.xlsx",
+  "seller_history_path": "output\\seller_history.xlsx",
   "registry_new_inn_output": "output\\new_inn_for_kontur.xlsx",
   "registry_merge_primary": "output\\inn_registry.xlsx",
   "registry_merge_secondary": "",

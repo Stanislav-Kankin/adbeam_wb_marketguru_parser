@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import ExitStack
 from pathlib import Path
 
 from .excel_io import (
     analyze_workbook,
+    build_known_seller_batch_row,
+    build_viewed_seller_batch_row,
+    import_seller_history_from_registry_files,
     extract_research_rows,
+    load_known_seller_sources,
     merge_inn_registry_files,
     merge_batch_results_with_compass,
     export_batch_no_inn,
@@ -17,6 +22,7 @@ from .excel_io import (
     save_batch_results,
     save_research_sample,
     summarize_research_rows_by_sheet,
+    update_seller_history_from_batch_files,
 )
 from .wb_research import BatchInspector, build_row_error_result, inspect_product_row
 
@@ -34,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     sample_parser.add_argument("--output", type=Path, default=Path("output/research_sample.xlsx"))
     sample_parser.add_argument("--limit", type=int, default=None)
     sample_parser.add_argument("--sheet", dest="selected_sheets", action="append", default=None)
+    sample_parser.add_argument("--registry", type=Path, default=None)
+    sample_parser.add_argument("--seller-history", type=Path, default=None)
 
     inspect_parser = subparsers.add_parser("inspect-row", help="Открыть одну строку через Playwright и сохранить артефакты")
     inspect_parser.add_argument("--input", required=True, type=Path)
@@ -56,13 +64,21 @@ def build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--output", type=Path, default=Path("output/batch_results.xlsx"))
     batch_parser.add_argument("--artifacts-dir", type=Path, default=Path("output/batch_artifacts"))
     batch_parser.add_argument("--profile-dir", type=Path, default=Path("output/wb_profile"))
+    batch_parser.add_argument("--registry", type=Path, default=None)
+    batch_parser.add_argument("--seller-history", type=Path, default=None)
 
     merge_parser = subparsers.add_parser("merge-compass", help="Склеить batch_results.xlsx с выгрузкой Compass по ИНН")
 
     export_inn_parser = subparsers.add_parser("export-inn", help="Экспортировать уникальные ИНН из batch_results.xlsx для Compass")
+    seller_history_parser = subparsers.add_parser("update-seller-history", help="Обновить историю просмотренных sellers из batch_results.xlsx")
+    import_history_parser = subparsers.add_parser("import-history-from-registry", help="Импортировать sellers в историю из реестрового Excel")
     merge_registry_parser = subparsers.add_parser("merge-registries", help="Объединить 2 реестра ИНН с приоритетом первого")
     export_inn_parser.add_argument("--batch-results", required=True, type=Path)
     export_inn_parser.add_argument("--output", type=Path, default=Path("output/inn_for_compass.xlsx"))
+    seller_history_parser.add_argument("--batch-results", required=True, type=Path, nargs="+")
+    seller_history_parser.add_argument("--output", type=Path, default=Path("output/seller_history.xlsx"))
+    import_history_parser.add_argument("--input", required=True, type=Path, nargs="+")
+    import_history_parser.add_argument("--output", type=Path, default=Path("output/seller_history.xlsx"))
 
     no_inn_parser = subparsers.add_parser("export-no-inn", help="Сохранить строки batch_results.xlsx без найденного ИНН")
     no_inn_parser.add_argument("--batch-results", required=True, type=Path)
@@ -92,7 +108,27 @@ def main() -> None:
 
     if args.command == "sample":
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        rows = extract_research_rows(args.input, limit=args.limit, selected_sheets=args.selected_sheets)
+        if args.registry is not None and not args.registry.exists():
+            raise FileNotFoundError(f"Не найден реестр ИНН: {args.registry}")
+        excluded_seller_keys = None
+        known_seller_sources = load_known_seller_sources(
+            registry_path=args.registry,
+            seller_history_path=args.seller_history,
+        )
+        if known_seller_sources:
+            excluded_seller_keys = set(known_seller_sources)
+            if args.registry is not None:
+                print(f"Исключаю продавцов из реестра ИНН: {args.registry}")
+            if args.seller_history is not None:
+                print(f"Исключаю продавцов из истории sellers: {args.seller_history}")
+            print(f"Всего ключей продавцов для пропуска: {len(excluded_seller_keys)}")
+
+        rows = extract_research_rows(
+            args.input,
+            limit=args.limit,
+            selected_sheets=args.selected_sheets,
+            excluded_seller_keys=excluded_seller_keys,
+        )
         save_research_sample(args.output, rows)
         print(f"Создан файл: {args.output}")
         print(f"Строк (уникальных по seller): {len(rows)}")
@@ -128,12 +164,65 @@ def main() -> None:
         args.artifacts_dir.mkdir(parents=True, exist_ok=True)
         args.profile_dir.mkdir(parents=True, exist_ok=True)
         args.output.parent.mkdir(parents=True, exist_ok=True)
+        if args.registry is not None and not args.registry.exists():
+            raise FileNotFoundError(f"Не найден реестр ИНН: {args.registry}")
+
+        known_seller_sources = load_known_seller_sources(
+            registry_path=args.registry,
+            seller_history_path=args.seller_history,
+        )
+        if args.registry is not None:
+            print(f"Подключен реестр ИНН: {args.registry}")
+        if args.seller_history is not None:
+            print(f"Подключена история sellers: {args.seller_history}")
+        if known_seller_sources:
+            print(f"Всего ключей продавцов для пропуска: {len(known_seller_sources)}")
 
         research_rows = read_research_rows_range(args.input, start_row=args.start_row, limit=args.limit)
         output_rows = []
-        with BatchInspector(artifacts_dir=args.artifacts_dir, headful=True, profile_dir=args.profile_dir) as inspector:
+        skipped_known_sellers = 0
+        skipped_viewed_sellers = 0
+        with ExitStack() as exit_stack:
+            inspector: BatchInspector | None = None
             for offset, research_row in enumerate(research_rows, start=0):
                 row_number = args.start_row + offset
+                seller_key = (research_row.seller_name_raw or "").strip().casefold()
+                known_payload = known_seller_sources.get(seller_key) if seller_key else None
+                if known_payload is not None:
+                    source_type = known_payload["source"]
+                    source_path = known_payload["path"]
+                    source_row = known_payload["row"]
+                    if source_type == "inn_registry":
+                        skipped_row = build_known_seller_batch_row(
+                            row_number=row_number,
+                            research_row=research_row,
+                            registry_row=source_row,
+                            registry_path=source_path,
+                        )
+                        skipped_known_sellers += 1
+                    else:
+                        skipped_row = build_viewed_seller_batch_row(
+                            row_number=row_number,
+                            research_row=research_row,
+                            history_row=source_row,
+                            history_path=source_path,
+                        )
+                        skipped_viewed_sellers += 1
+                    output_rows.append(skipped_row)
+                    print(json.dumps({
+                        "row_number": row_number,
+                        "seller_name_raw": research_row.seller_name_raw,
+                        "parse_status": skipped_row["parse_status"],
+                        "inn": skipped_row["inn"],
+                        "seller_url": skipped_row["seller_url"],
+                        "parse_note": skipped_row["parse_note"],
+                    }, ensure_ascii=False, indent=2))
+                    continue
+
+                if inspector is None:
+                    inspector = exit_stack.enter_context(
+                        BatchInspector(artifacts_dir=args.artifacts_dir, headful=True, profile_dir=args.profile_dir)
+                    )
                 try:
                     result = inspector.inspect_row(
                         row_number=row_number,
@@ -185,6 +274,17 @@ def main() -> None:
         save_batch_results(args.output, output_rows)
         print(f"Итоговый Excel сохранён: {args.output}")
         print(f"Обработано строк: {len(output_rows)}")
+        if args.seller_history is not None:
+            history_summary = update_seller_history_from_batch_files(
+                batch_results_paths=[args.output],
+                history_path=args.seller_history,
+            )
+            print(f"История sellers обновлена автоматически: {args.seller_history}")
+            print(f"Новых sellers добавлено: {history_summary['new_seller_added']}")
+            print(f"Всего sellers в истории: {history_summary['history_rows']}")
+        if args.registry is not None or args.seller_history is not None:
+            print(f"Пропущено по реестру: {skipped_known_sellers}")
+            print(f"Пропущено по истории sellers: {skipped_viewed_sellers}")
         return
 
     if args.command == "manual-session":
@@ -219,6 +319,22 @@ def main() -> None:
             primary_registry_path=args.primary_registry,
             secondary_registry_path=args.secondary_registry,
             output_path=args.output,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "update-seller-history":
+        summary = update_seller_history_from_batch_files(
+            batch_results_paths=args.batch_results,
+            history_path=args.output,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "import-history-from-registry":
+        summary = import_seller_history_from_registry_files(
+            registry_paths=args.input,
+            history_path=args.output,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return

@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 import os
 import subprocess
@@ -17,8 +18,12 @@ from adbeam_excel_parser.excel_exporter import build_output_path, export_audit_t
 from adbeam_excel_parser.excel_reader import read_excel_summary
 from .excel_io import (
     analyze_workbook,
+    build_known_seller_batch_row,
+    build_viewed_seller_batch_row,
     discover_batch_results,
     extract_research_rows,
+    import_seller_history_from_registry_files,
+    load_known_seller_sources,
     merge_inn_registry_files,
     read_research_row,
     read_research_rows_range,
@@ -27,6 +32,7 @@ from .excel_io import (
     save_research_sample,
     summarize_research_rows_by_sheet,
     update_inn_registry_from_batch_files,
+    update_seller_history_from_batch_files,
 )
 from .models import AnalyzeSummary
 from .wb_research import BatchInspector, build_row_error_result, inspect_product_row
@@ -54,6 +60,7 @@ class App:
         self.compass_input_var = tk.StringVar()
         self.enriched_output_var = tk.StringVar(value=str(Path("output/final_enriched.xlsx")))
         self.registry_path_var = tk.StringVar(value=str(Path("output/inn_registry.xlsx")))
+        self.seller_history_path_var = tk.StringVar(value=str(Path("output/seller_history.xlsx")))
         self.registry_new_inn_output_var = tk.StringVar(value=str(Path("output/new_inn_for_kontur.xlsx")))
         self.registry_merge_primary_var = tk.StringVar(value=str(Path("output/inn_registry.xlsx")))
         self.registry_merge_secondary_var = tk.StringVar()
@@ -333,7 +340,7 @@ class App:
         ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 8))
         ttk.Label(
             frame,
-            text="Создаёт общий sample по выбранным листам и убирает дубли по имени seller.",
+            text="Создаёт общий sample по выбранным листам, убирает дубли по имени seller и может сразу исключать продавцов из реестра/истории.",
             style="Muted.TLabel",
             wraplength=380,
             justify="left",
@@ -413,7 +420,7 @@ class App:
     def _build_registry_tab(self, parent):
         frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(2, weight=1)
+        frame.rowconfigure(2, weight=1, minsize=220)
 
         settings = ttk.LabelFrame(frame, text="Реестр ИНН", padding=12, style="Card.TLabelframe")
         settings.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -423,17 +430,21 @@ class App:
         ttk.Entry(settings, textvariable=self.registry_path_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
         ttk.Button(settings, text="Выбрать", command=self._choose_registry_path, style="Secondary.TButton").grid(row=0, column=2, pady=4)
 
-        ttk.Label(settings, text="Новые ИНН для Контур", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
-        ttk.Entry(settings, textvariable=self.registry_new_inn_output_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
-        ttk.Button(settings, text="Выбрать", command=self._choose_registry_new_inn_output, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+        ttk.Label(settings, text="История просмотренных sellers", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(settings, textvariable=self.seller_history_path_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(settings, text="Выбрать", command=self._choose_seller_history_path, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+
+        ttk.Label(settings, text="Новые ИНН для Контур", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(settings, textvariable=self.registry_new_inn_output_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(settings, text="Выбрать", command=self._choose_registry_new_inn_output, style="Secondary.TButton").grid(row=2, column=2, pady=4)
 
         ttk.Label(
             settings,
-            text="Один ИНН = одна строка. Если ИНН уже есть, первые seller/category не меняются; обновляются last_seen и seen_count.",
+            text="Реестр ИНН хранит найденные реквизиты, а история sellers хранит уже просмотренных продавцов. Оба файла используются для пропуска повторов.",
             style="Muted.TLabel",
             wraplength=900,
             justify="left",
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         merge_registry = ttk.LabelFrame(frame, text="Объединение 2 реестров", padding=12, style="Card.TLabelframe")
         merge_registry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
@@ -479,7 +490,7 @@ class App:
         files = ttk.LabelFrame(frame, text="Batch-файлы для импорта", padding=12, style="Card.TLabelframe")
         files.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         files.columnconfigure(0, weight=1)
-        files.rowconfigure(0, weight=1)
+        files.rowconfigure(0, weight=1, minsize=180)
 
         list_frame = ttk.Frame(files)
         list_frame.grid(row=0, column=0, sticky="nsew")
@@ -487,6 +498,7 @@ class App:
         list_frame.rowconfigure(0, weight=1)
         self.registry_batch_listbox = tk.Listbox(
             list_frame,
+            selectmode=tk.EXTENDED,
             height=10,
             exportselection=False,
             bg="#ffffff",
@@ -501,32 +513,60 @@ class App:
         self.registry_batch_listbox.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.registry_batch_listbox.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.registry_batch_listbox.configure(yscrollcommand=scrollbar.set)
+        xscrollbar = ttk.Scrollbar(list_frame, orient="horizontal", command=self.registry_batch_listbox.xview)
+        xscrollbar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.registry_batch_listbox.configure(yscrollcommand=scrollbar.set, xscrollcommand=xscrollbar.set)
 
         file_buttons = ttk.Frame(files)
-        file_buttons.grid(row=0, column=1, sticky="ns", padx=(12, 0))
+        file_buttons.grid(row=0, column=1, sticky="n", padx=(12, 0))
         ttk.Button(file_buttons, text="Добавить файлы", command=self._add_registry_batch_files, style="Secondary.TButton").grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(file_buttons, text="Добавить папку", command=self._add_registry_batch_dir, style="Secondary.TButton").grid(row=1, column=0, sticky="ew", pady=8)
         ttk.Button(file_buttons, text="Очистить список", command=self._clear_registry_batch_files, style="Secondary.TButton").grid(row=2, column=0, sticky="ew", pady=8)
 
         actions = ttk.Frame(frame)
         actions.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        for index in range(4):
+        for index in range(6):
             actions.columnconfigure(index, weight=1)
         ttk.Button(
             actions,
-            text="Обновить реестр",
-            command=lambda: self._run_in_thread(self._action_update_registry, task_name="Обновление реестра ИНН"),
+            text="Обновить реестр и историю",
+            command=lambda: self._run_in_thread(self._action_update_registry, task_name="Обновление реестра ИНН и истории sellers"),
             style="Primary.TButton",
         ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(actions, text="Открыть реестр", command=self._open_registry_path, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(actions, text="Открыть новые ИНН", command=self._open_registry_new_inn, style="Secondary.TButton").grid(row=0, column=2, sticky="ew", padx=6)
-        ttk.Button(actions, text="Взять текущий batch", command=self._use_current_batch_for_registry, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=(6, 0))
+        ttk.Button(
+            actions,
+            text="Импорт sellers из реестра",
+            command=self._start_import_history_from_registry,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(actions, text="Открыть реестр", command=self._open_registry_path, style="Secondary.TButton").grid(row=0, column=2, sticky="ew", padx=6)
+        ttk.Button(actions, text="Открыть историю sellers", command=self._open_seller_history_path, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=6)
+        ttk.Button(actions, text="Открыть новые ИНН", command=self._open_registry_new_inn, style="Secondary.TButton").grid(row=0, column=4, sticky="ew", padx=6)
+        ttk.Button(actions, text="Взять текущий batch", command=self._use_current_batch_for_registry, style="Secondary.TButton").grid(row=0, column=5, sticky="ew", padx=(6, 0))
 
         summary = ttk.LabelFrame(frame, text="Сводка", padding=12, style="Card.TLabelframe")
-        summary.grid(row=4, column=0, sticky="ew")
+        summary.grid(row=4, column=0, sticky="nsew")
         summary.columnconfigure(0, weight=1)
-        ttk.Label(summary, textvariable=self.registry_summary_var, style="Body.TLabel", justify="left").grid(row=0, column=0, sticky="ew")
+        summary.rowconfigure(0, weight=1)
+        self.registry_summary_text = tk.Text(
+            summary,
+            wrap="word",
+            height=8,
+            bg="#ffffff",
+            fg="#1f2a37",
+            insertbackground="#1f2a37",
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="#dbe4f0",
+            relief="solid",
+            font=("Consolas", 10),
+        )
+        self.registry_summary_text.grid(row=0, column=0, sticky="nsew")
+        summary_scrollbar = ttk.Scrollbar(summary, orient="vertical", command=self.registry_summary_text.yview)
+        summary_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.registry_summary_text.configure(yscrollcommand=summary_scrollbar.set)
+        self.registry_summary_text.configure(state="disabled")
+        self._set_registry_summary_ui(self.registry_summary_var.get())
         return frame
 
     def _build_status_log_block(self, parent):
@@ -597,6 +637,7 @@ class App:
             self.compass_input_var,
             self.enriched_output_var,
             self.registry_path_var,
+            self.seller_history_path_var,
             self.registry_new_inn_output_var,
             self.registry_merge_primary_var,
             self.registry_merge_secondary_var,
@@ -612,6 +653,12 @@ class App:
         path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
         if not path.exists():
             raise FileNotFoundError(f"Не найден реестр ИНН: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _open_seller_history_path(self) -> None:
+        path = Path(self.seller_history_path_var.get().strip() or "output/seller_history.xlsx")
+        if not path.exists():
+            raise FileNotFoundError(f"Не найдена история sellers: {path}")
         os.startfile(path)  # type: ignore[attr-defined]
 
     def _open_registry_merge_output(self) -> None:
@@ -665,6 +712,7 @@ class App:
             "compass_input": self.compass_input_var,
             "enriched_output": self.enriched_output_var,
             "registry_path": self.registry_path_var,
+            "seller_history_path": self.seller_history_path_var,
             "registry_new_inn_output": self.registry_new_inn_output_var,
             "registry_merge_primary": self.registry_merge_primary_var,
             "registry_merge_secondary": self.registry_merge_secondary_var,
@@ -687,7 +735,7 @@ class App:
             self.sample_summary_var.set(sample_summary)
         registry_summary = settings.get("registry_summary")
         if isinstance(registry_summary, str) and registry_summary:
-            self.registry_summary_var.set(registry_summary)
+            self._set_registry_summary(registry_summary)
         adbeam_summary = settings.get("adbeam_summary")
         if isinstance(adbeam_summary, str) and adbeam_summary:
             self.adbeam_summary_var.set(adbeam_summary)
@@ -714,6 +762,7 @@ class App:
                 "compass_input": self.compass_input_var.get().strip(),
                 "enriched_output": self.enriched_output_var.get().strip(),
                 "registry_path": self.registry_path_var.get().strip(),
+                "seller_history_path": self.seller_history_path_var.get().strip(),
                 "registry_new_inn_output": self.registry_new_inn_output_var.get().strip(),
                 "registry_merge_primary": self.registry_merge_primary_var.get().strip(),
                 "registry_merge_secondary": self.registry_merge_secondary_var.get().strip(),
@@ -729,6 +778,19 @@ class App:
             SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    def _set_registry_summary(self, text: str) -> None:
+        self.registry_summary_var.set(text)
+        self.root.after(0, lambda text=text: self._set_registry_summary_ui(text))
+
+    def _set_registry_summary_ui(self, text: str) -> None:
+        if not hasattr(self, "registry_summary_text"):
+            return
+        self.registry_summary_text.configure(state="normal")
+        self.registry_summary_text.delete("1.0", "end")
+        if text:
+            self.registry_summary_text.insert("1.0", text)
+        self.registry_summary_text.configure(state="disabled")
 
     def _on_close(self) -> None:
         self._save_settings()
@@ -829,6 +891,16 @@ class App:
         if path:
             self.registry_path_var.set(path)
 
+    def _choose_seller_history_path(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Выбери или создай историю просмотренных sellers",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=Path(self.seller_history_path_var.get()).name,
+        )
+        if path:
+            self.seller_history_path_var.set(path)
+
     def _choose_registry_new_inn_output(self) -> None:
         path = filedialog.asksaveasfilename(
             title="Куда сохранить новые ИНН для Контур",
@@ -864,6 +936,20 @@ class App:
         )
         if path:
             self.registry_merge_output_var.set(path)
+
+    def _start_import_history_from_registry(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Выбери реестры для импорта sellers в историю",
+            filetypes=[("Excel", "*.xlsx *.xlsm *.xls")],
+        )
+        if not paths:
+            return
+
+        registry_paths = [Path(path) for path in paths]
+        self._run_in_thread(
+            lambda registry_paths=registry_paths: self._action_import_history_from_registry(registry_paths),
+            task_name="Импорт sellers из реестра",
+        )
 
     def _add_registry_batch_files(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -905,13 +991,13 @@ class App:
             added += 1
         self._refresh_registry_batch_listbox()
         suffix = f" Пропущено не-batch файлов: {skipped}." if skipped else ""
-        self.registry_summary_var.set(f"Добавлено batch-файлов: {added}. Всего в списке: {len(self._registry_batch_files)}.{suffix}")
+        self._set_registry_summary(f"Добавлено batch-файлов: {added}. Всего в списке: {len(self._registry_batch_files)}.{suffix}")
         self._save_settings()
 
     def _clear_registry_batch_files(self) -> None:
         self._registry_batch_files = []
         self._refresh_registry_batch_listbox()
-        self.registry_summary_var.set("Список batch-файлов очищен")
+        self._set_registry_summary("Список batch-файлов очищен")
         self._save_settings()
 
     def _refresh_registry_batch_listbox(self) -> None:
@@ -1096,8 +1182,22 @@ class App:
         raw_limit = self.limit_var.get().strip()
         limit = self._parse_positive_int(raw_limit, field_name="Лимит строк") if raw_limit else None
         selected_sheets = self._resolve_selected_sheets_for_sample()
+        excluded_seller_keys = None
+        registry_path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
+        seller_history_path = Path(self.seller_history_path_var.get().strip() or "output/seller_history.xlsx")
+        known_seller_sources = load_known_seller_sources(
+            registry_path=registry_path if registry_path.exists() else None,
+            seller_history_path=seller_history_path if seller_history_path.exists() else None,
+        )
+        if known_seller_sources:
+            excluded_seller_keys = set(known_seller_sources)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = extract_research_rows(input_path, limit=limit, selected_sheets=selected_sheets)
+        rows = extract_research_rows(
+            input_path,
+            limit=limit,
+            selected_sheets=selected_sheets,
+            excluded_seller_keys=excluded_seller_keys,
+        )
         if not rows:
             raise ValueError("Не удалось собрать ни одной строки для research sample")
 
@@ -1107,6 +1207,18 @@ class App:
         sheet_scope_label = self._build_sheet_scope_label(selected_sheets)
         self._append_log(f"Создан файл: {output_path}\n")
         self._append_log(f"Листы для sample: {sheet_scope_label}\n")
+        if registry_path.exists():
+            self._append_log(
+                f"Sample: подключен реестр ИНН {registry_path}\n"
+            )
+        if seller_history_path.exists():
+            self._append_log(
+                f"Sample: подключена история sellers {seller_history_path}\n"
+            )
+        if excluded_seller_keys is not None:
+            self._append_log(
+                f"Из sample исключены продавцы из известных источников | ключей для пропуска: {len(excluded_seller_keys)}\n"
+            )
         if limit is None:
             self._append_log("Лимит строк не задан: в sample сохранены все уникальные продавцы по имени seller\n")
         self._append_log(f"Строк (уникальных по seller): {len(rows)}\n")
@@ -1161,6 +1273,8 @@ class App:
         artifacts_dir = Path(self.artifacts_dir_var.get())
         profile_dir = self._required_profile_dir()
         batch_output = Path(self.batch_output_var.get())
+        registry_path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
+        seller_history_path = Path(self.seller_history_path_var.get().strip() or "output/seller_history.xlsx")
 
         if artifacts_dir.resolve() == profile_dir.resolve():
             raise ValueError("Папка артефактов и папка профиля WB должны быть разными")
@@ -1169,19 +1283,62 @@ class App:
         profile_dir.mkdir(parents=True, exist_ok=True)
         batch_output.parent.mkdir(parents=True, exist_ok=True)
 
+        known_seller_sources = load_known_seller_sources(
+            registry_path=registry_path if registry_path.exists() else None,
+            seller_history_path=seller_history_path if seller_history_path.exists() else None,
+        )
+
         research_rows = read_research_rows_range(sample_path, start_row=start_row, limit=batch_count)
         total = len(research_rows)
         self._append_log(f"Batch: старт диапазона строк {start_row}-{start_row + max(total - 1, 0)} | sample={sample_path}\n")
+        if registry_path.exists():
+            self._append_log(f"Batch: подключен реестр ИНН {registry_path}\n")
+        if seller_history_path.exists():
+            self._append_log(f"Batch: подключена история sellers {seller_history_path}\n")
+        if known_seller_sources:
+            self._append_log(f"Batch: всего ключей продавцов для пропуска: {len(known_seller_sources)}\n")
         output_rows = []
+        skipped_known_sellers = 0
+        skipped_viewed_sellers = 0
         self._set_batch_progress(done=0, total=max(total, 1))
 
-        with BatchInspector(artifacts_dir=artifacts_dir, headful=True, profile_dir=profile_dir) as inspector:
+        with ExitStack() as exit_stack:
+            inspector: BatchInspector | None = None
             for offset, research_row in enumerate(research_rows, start=0):
                 row_number = start_row + offset
                 self._set_batch_progress(done=offset, total=total, row_number=row_number, seller=research_row.seller_name_raw)
+                seller_key = (research_row.seller_name_raw or "").strip().casefold()
+                known_payload = known_seller_sources.get(seller_key) if seller_key else None
+                if known_payload is not None:
+                    if known_payload["source"] == "inn_registry":
+                        skipped_row = build_known_seller_batch_row(
+                            row_number=row_number,
+                            research_row=research_row,
+                            registry_row=known_payload["row"],
+                            registry_path=known_payload["path"],
+                        )
+                        skipped_known_sellers += 1
+                    else:
+                        skipped_row = build_viewed_seller_batch_row(
+                            row_number=row_number,
+                            research_row=research_row,
+                            history_row=known_payload["row"],
+                            history_path=known_payload["path"],
+                        )
+                        skipped_viewed_sellers += 1
+                    output_rows.append(skipped_row)
+                    self._append_log(
+                        f"Batch: строка {row_number} пропущена по известному seller | seller={research_row.seller_name_raw} | status={skipped_row['parse_status']} | inn={skipped_row['inn']}\n"
+                    )
+                    continue
+
                 self._append_log(
                     f"Batch: обрабатываю строку {row_number}/{start_row + total - 1} | sheet={research_row.source_sheet} | seller={research_row.seller_name_raw}\n"
                 )
+                if inspector is None:
+                    inspector = exit_stack.enter_context(
+                        BatchInspector(artifacts_dir=artifacts_dir, headful=True, profile_dir=profile_dir)
+                    )
                 try:
                     result = inspector.inspect_row(
                         row_number=row_number,
@@ -1234,11 +1391,21 @@ class App:
                 self._append_log(f"Batch: строка {row_number} завершена, status={result.parse_status}, inn={result.inn}\n")
 
         save_batch_results(batch_output, output_rows)
+        history_summary = update_seller_history_from_batch_files(
+            batch_results_paths=[batch_output],
+            history_path=seller_history_path,
+        )
         self.root.after(0, lambda batch_output=batch_output: self.merge_batch_input_var.set(str(batch_output)))
         self._set_batch_progress(done=total, total=max(total, 1), row_number=start_row + total - 1 if total else start_row)
         next_row = start_row + total
         self.root.after(0, lambda next_row=next_row: self.row_var.set(str(next_row)))
         self._append_log(f"Batch: итоговый файл сохранён: {batch_output}\n")
+        self._append_log(
+            f"Batch: история sellers обновлена автоматически | файл={seller_history_path} | новых sellers={history_summary['new_seller_added']} | всего sellers={history_summary['history_rows']}\n"
+        )
+        if known_seller_sources:
+            self._append_log(f"Batch: пропущено по реестру ИНН: {skipped_known_sellers}\n")
+            self._append_log(f"Batch: пропущено по истории sellers: {skipped_viewed_sellers}\n")
         self._append_log(f"Batch: рекомендованная следующая стартовая строка = {next_row}\n")
         self.root.after(0, lambda: messagebox.showinfo("Batch завершён", f"Итоговый Excel сохранён:\n{batch_output}"))
         self.root.after(0, lambda batch_output=batch_output: self._prompt_add_batch_to_registry(batch_output))
@@ -1246,7 +1413,7 @@ class App:
     def _prompt_add_batch_to_registry(self, batch_output: Path) -> None:
         if messagebox.askyesno(
             "Реестр ИНН",
-            "Batch завершён. Добавить этот batch_results.xlsx во вкладку Реестр ИНН?",
+            "Batch завершён. История sellers уже обновлена автоматически. Добавить этот batch_results.xlsx ещё и во вкладку реестра ИНН?",
         ):
             self._add_registry_batch_paths([batch_output])
 
@@ -1280,7 +1447,7 @@ class App:
             f"Итоговых ИНН: {summary['merged_registry_rows']}\n"
             f"Итоговый реестр: {summary['output_path']}"
         )
-        self.registry_summary_var.set(text)
+        self._set_registry_summary(text)
         self._append_log("Registry Merge: объединение завершено\n")
         self._append_log(text + "\n")
         self._save_settings()
@@ -1296,35 +1463,81 @@ class App:
             raise FileNotFoundError("Не найдены batch-файлы:\n" + "\n".join(missing[:10]))
 
         registry_path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
+        seller_history_path = Path(self.seller_history_path_var.get().strip() or "output/seller_history.xlsx")
         new_inn_output_path = Path(self.registry_new_inn_output_var.get().strip() or "output/new_inn_for_kontur.xlsx")
 
         self._append_log(f"Registry: registry={registry_path}\n")
+        self._append_log(f"Registry: seller_history={seller_history_path}\n")
         self._append_log(f"Registry: new_inn={new_inn_output_path}\n")
         self._append_log(f"Registry: batch_files={len(batch_paths)}\n")
 
-        summary = update_inn_registry_from_batch_files(
+        registry_summary = update_inn_registry_from_batch_files(
             batch_results_paths=batch_paths,
             registry_path=registry_path,
             new_inn_output_path=new_inn_output_path,
         )
+        history_summary = update_seller_history_from_batch_files(
+            batch_results_paths=batch_paths,
+            history_path=seller_history_path,
+        )
 
         text = (
-            f"Файлов batch: {summary['batch_files']}\n"
-            f"Строк всего: {summary['rows_total']}\n"
-            f"Строк с ИНН: {summary['rows_with_inn']}\n"
-            f"Новых ИНН добавлено: {summary['new_inn_added']}\n"
-            f"Уже были в реестре: {summary['already_known']}\n"
-            f"Дубликаты в импорте: {summary['duplicate_in_import']}\n"
-            f"Пропущено без ИНН: {summary['skipped_without_inn']}\n"
-            f"Всего ИНН в реестре: {summary['registry_rows']}\n"
-            f"Реестр: {summary['registry_path']}\n"
-            f"Новые ИНН для Контур: {summary['new_inn_output_path']}"
+            f"Файлов batch: {registry_summary['batch_files']}\n"
+            f"Строк всего: {registry_summary['rows_total']}\n"
+            f"Строк с ИНН: {registry_summary['rows_with_inn']}\n"
+            f"Новых ИНН добавлено: {registry_summary['new_inn_added']}\n"
+            f"Уже были в реестре: {registry_summary['already_known']}\n"
+            f"Дубликаты ИНН в импорте: {registry_summary['duplicate_in_import']}\n"
+            f"Пропущено без ИНН: {registry_summary['skipped_without_inn']}\n"
+            f"Всего ИНН в реестре: {registry_summary['registry_rows']}\n"
+            f"Реестр ИНН: {registry_summary['registry_path']}\n"
+            f"Новые ИНН для Контур: {registry_summary['new_inn_output_path']}\n\n"
+            f"История sellers: {history_summary['history_path']}\n"
+            f"Строк с seller: {history_summary['rows_with_seller']}\n"
+            f"Новых sellers добавлено: {history_summary['new_seller_added']}\n"
+            f"Уже были в истории: {history_summary['already_known']}\n"
+            f"Дубликаты sellers в импорте: {history_summary['duplicate_in_import']}\n"
+            f"Пропущено без seller: {history_summary['skipped_without_seller']}\n"
+            f"Seller-ов с автопропуском: {history_summary['skip_recommended_total']}\n"
+            f"Всего sellers в истории: {history_summary['history_rows']}"
         )
-        self.registry_summary_var.set(text)
-        self._append_log("Registry: обновление завершено\n")
+        self._set_registry_summary(text)
+        self._append_log("Registry: обновление реестра ИНН и истории sellers завершено\n")
         self._append_log(text + "\n")
         self._save_settings()
-        self.root.after(0, lambda: messagebox.showinfo("Реестр ИНН обновлён", text))
+        self.root.after(0, lambda: messagebox.showinfo("Реестр И история обновлены", text))
+
+    def _action_import_history_from_registry(self, registry_paths: list[Path]) -> None:
+        missing = [str(path) for path in registry_paths if not path.exists()]
+        if missing:
+            raise FileNotFoundError("Не найдены файлы реестра:\n" + "\n".join(missing[:10]))
+
+        seller_history_path = Path(self.seller_history_path_var.get().strip() or "output/seller_history.xlsx")
+
+        self._append_log(f"History Import: seller_history={seller_history_path}\n")
+        self._append_log(f"History Import: registry_files={len(registry_paths)}\n")
+        summary = import_seller_history_from_registry_files(
+            registry_paths=registry_paths,
+            history_path=seller_history_path,
+        )
+
+        text = (
+            f"Файлов реестра: {summary['source_files']}\n"
+            f"Строк всего: {summary['rows_total']}\n"
+            f"Строк с seller: {summary['rows_with_seller']}\n"
+            f"Новых sellers добавлено: {summary['new_seller_added']}\n"
+            f"Уже были в истории: {summary['already_known']}\n"
+            f"Дубликаты sellers в импорте: {summary['duplicate_in_import']}\n"
+            f"Пропущено без seller: {summary['skipped_without_seller']}\n"
+            f"Seller-ов с автопропуском: {summary['skip_recommended_total']}\n"
+            f"Всего sellers в истории: {summary['history_rows']}\n"
+            f"История sellers: {summary['history_path']}"
+        )
+        self._set_registry_summary(text)
+        self._append_log("History Import: импорт sellers из реестра завершён\n")
+        self._append_log(text + "\n")
+        self._save_settings()
+        self.root.after(0, lambda: messagebox.showinfo("История sellers обновлена", text))
 
     def _action_merge_compass(self) -> None:
         batch_results_value = self.merge_batch_input_var.get().strip() or self.batch_output_var.get().strip() or "output/batch_results.xlsx"
