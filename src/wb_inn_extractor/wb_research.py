@@ -40,6 +40,10 @@ SELLER_HEADER_RE = re.compile(
     r"<h1[^>]*>(?P<name>.*?)</h1>",
     re.IGNORECASE | re.DOTALL,
 )
+SELLER_DETAILS_TITLE_RE = re.compile(
+    r"<(?:h1|h2)[^>]*class=\"[^\"]*seller-details__title[^\"]*\"[^>]*>(?P<name>.*?)</(?:h1|h2)>",
+    re.IGNORECASE | re.DOTALL,
+)
 TOOLTIP_TEXT_RE = re.compile(
     r"<div[^>]*class=\"[^\"]*tooltip__content[^\"]*\"[^>]*>(?P<body>.*?)</div>",
     re.IGNORECASE | re.DOTALL,
@@ -58,6 +62,14 @@ IGNORED_SELLER_DISPLAY_NAMES = {
     "wildberries",
     "wibes",
 }
+
+EMPTY_RESULTS_PATTERNS = [
+    "по вашему запросу ничего не найдено",
+    "ничего не найдено",
+    "ничего не нашлось",
+    "nothing found",
+    "no results found",
+]
 
 ANTI_BOT_PATTERNS = [
     "Подозрительная активность",
@@ -81,6 +93,15 @@ SELLER_TOOLTIP_TRIGGER_SELECTORS = [
     '.seller-info__info-icon',
     '.seller-info i',
 ]
+
+SAFE_CLICK_SELLER_TOOLTIP_TRIGGER_SELECTORS = {
+    '.seller-details__title-wrap .seller-details__tip-info',
+    '.seller-details__tip-info',
+    '.seller-details__info-wrap .seller-details__tip-info',
+    '.seller-details__info-icon',
+    '.seller-info__info-icon',
+    '.seller-info i',
+}
 
 TOOLTIP_VISIBLE_SELECTORS = [
     ".tooltip.tooltip-supplier",
@@ -601,6 +622,9 @@ def _reveal_supplier_requisites_with_strategy(
     if _contains_seller_signal(captured_tooltip_text or ""):
         return captured_tooltip_text
 
+    if _page_has_empty_results_state(page):
+        return captured_tooltip_text or dom_text
+
     if not _page_has_requisites_entrypoints(page, deep_mode=deep_mode):
         return captured_tooltip_text
 
@@ -633,6 +657,9 @@ def _reveal_supplier_requisites_with_strategy(
 
 
 def _trigger_supplier_tooltip(page: Page, deep_mode: bool = False) -> None:
+    if _page_has_empty_results_state(page):
+        return
+
     selectors = list(SELLER_TOOLTIP_TRIGGER_SELECTORS)
     if deep_mode:
         selectors.extend(DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS)
@@ -649,38 +676,95 @@ def _trigger_supplier_tooltip(page: Page, deep_mode: bool = False) -> None:
                     locator.focus(timeout=250)
                 except Exception:
                     pass
-                try:
-                    locator.click(timeout=375, force=True)
-                except Exception:
-                    pass
+                if selector in SAFE_CLICK_SELLER_TOOLTIP_TRIGGER_SELECTORS:
+                    _safe_click_seller_tooltip_trigger(page, locator)
+                    if _tooltip_visible(page) or _contains_seller_signal(_extract_requisites_text_via_dom(page, include_body_scan=False) or ""):
+                        return
                 _dispatch_tooltip_events(page, locator)
-                try:
-                    locator.press("Enter", timeout=250)
-                except Exception:
-                    pass
-                _force_tooltip_open_via_js(page, selector)
+                _force_tooltip_open_via_js(locator)
                 if _tooltip_visible(page) or _contains_seller_signal(_extract_requisites_text_via_dom(page, include_body_scan=False) or ""):
                     return
             except Exception:
                 continue
 
 
-def _force_tooltip_open_via_js(page: Page, selector: str) -> None:
+def _safe_click_seller_tooltip_trigger(page: Page, locator: Locator) -> bool:
+    if not _is_safe_seller_tooltip_click_target(locator):
+        return False
+
     try:
-        page.evaluate(
+        locator.click(timeout=450, force=True, no_wait_after=True)
+    except Exception:
+        try:
+            locator.dispatch_event('click')
+        except Exception:
+            return False
+
+    try:
+        page.wait_for_timeout(90)
+    except Exception:
+        pass
+    return True
+
+
+def _is_safe_seller_tooltip_click_target(locator: Locator) -> bool:
+    try:
+        return bool(
+            locator.evaluate(
+                """
+                (node) => {
+                  if (!node) return false;
+                  const safeFragments = ['seller-details', 'seller-info', 'catalog-page__seller-details', 'tip-info', 'tooltip', 'supplier'];
+                  const dangerFragments = ['basket', 'cart', 'product-card', 'add-to-basket', 'favorites', 'postpone', 'orderwrap', 'buy'];
+
+                  let current = node;
+                  for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+                    const parts = [
+                      current.className || '',
+                      current.id || '',
+                      current.getAttribute?.('data-testid') || '',
+                      current.getAttribute?.('aria-label') || '',
+                      current.getAttribute?.('href') || '',
+                    ].join(' ').toLowerCase();
+
+                    if (dangerFragments.some((fragment) => parts.includes(fragment))) {
+                      return false;
+                    }
+                    if (safeFragments.some((fragment) => parts.includes(fragment))) {
+                      return true;
+                    }
+                  }
+                  return false;
+                }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def _force_tooltip_open_via_js(locator: Locator) -> None:
+    try:
+        locator.evaluate(
             """
-            (selector) => {
-              const nodes = Array.from(document.querySelectorAll(selector));
-              if (!nodes.length) return;
-              const events = ['mouseenter', 'mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'];
-              for (const node of nodes) {
-                for (const eventName of events) {
-                  node.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, composed: true, view: window }));
+            (node) => {
+              if (!node) return;
+              const mouseEvents = ['mouseenter', 'mouseover', 'mousemove'];
+              const pointerEvents = ['pointerenter', 'pointerover'];
+
+              for (const eventName of mouseEvents) {
+                node.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, composed: true, view: window }));
+              }
+              for (const eventName of pointerEvents) {
+                if (typeof PointerEvent === 'function') {
+                  node.dispatchEvent(new PointerEvent(eventName, { bubbles: true, cancelable: true, composed: true, view: window }));
                 }
               }
+              if (node instanceof HTMLElement) {
+                node.focus?.();
+              }
             }
-            """,
-            selector,
+            """
         )
     except Exception:
         return
@@ -715,7 +799,7 @@ def _dispatch_tooltip_events(page: Page, locator: Locator) -> None:
     except Exception:
         pass
     try:
-        locator.dispatch_event('click')
+        locator.dispatch_event('pointerenter')
     except Exception:
         pass
     try:
@@ -736,6 +820,9 @@ def _tooltip_visible(page: Page) -> bool:
 
 
 def _page_has_requisites_entrypoints(page: Page, deep_mode: bool) -> bool:
+    if _page_has_empty_results_state(page):
+        return False
+
     selectors = list(SELLER_TOOLTIP_TRIGGER_SELECTORS)
     if deep_mode:
         selectors.extend(DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS)
@@ -772,6 +859,7 @@ def _build_result(
     tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html)
     page_has_requisites_entrypoints = _page_has_requisites_entrypoints(page, deep_mode=False)
     seller_country = _detect_seller_country(tooltip_text or "", html, text)
+    empty_results_detected = _contains_empty_results_text(page_title or "", text, tooltip_text or "")
 
     inn = _first_non_empty(
         _first_match(INN_RE, tooltip_text or ""),
@@ -795,11 +883,13 @@ def _build_result(
         _extract_entity_type(html),
         _extract_entity_type(text),
     )
-    seller_display_name = _first_non_empty(
-        _extract_seller_display_name_from_html(html),
-        _extract_seller_display_name(tooltip_text or ""),
-        _extract_seller_display_name(text) if navigated_to_seller_page else None,
-    )
+    seller_display_name = None
+    if not empty_results_detected:
+        seller_display_name = _first_non_empty(
+            _extract_seller_display_name_from_html(html),
+            _extract_seller_display_name(tooltip_text or ""),
+            _extract_seller_display_name(text) if navigated_to_seller_page else None,
+        )
 
     combined_text = "\n".join(filter(None, [page_title or "", text, tooltip_text or "", inn or "", ogrn or "", ogrnip or "", entity_type or "", seller_display_name or ""]))
     anti_bot_detected = _contains_anti_bot_text(combined_text + "\n" + html[:5000], http_status)
@@ -813,6 +903,7 @@ def _build_result(
         manual_wait_seconds=manual_wait_seconds,
         navigated_to_seller_page=navigated_to_seller_page,
         page_has_requisites_entrypoints=page_has_requisites_entrypoints,
+        empty_results_detected=empty_results_detected,
     )
 
     return InspectResult(
@@ -855,6 +946,12 @@ def _extract_seller_display_name_from_html(html: str) -> str | None:
         if name:
             return name
 
+    for match in SELLER_DETAILS_TITLE_RE.finditer(html):
+        raw = TAG_RE.sub(' ', match.group('name'))
+        normalized = _normalize_text(raw)
+        if normalized and _is_plausible_seller_display_name(normalized):
+            return normalized[:120]
+
     for match in SELLER_HEADER_RE.finditer(html):
         raw = TAG_RE.sub(' ', match.group('name'))
         normalized = _normalize_text(raw)
@@ -872,6 +969,7 @@ def _detect_parse_status(
     manual_wait_seconds: int,
     navigated_to_seller_page: bool,
     page_has_requisites_entrypoints: bool,
+    empty_results_detected: bool,
 ) -> tuple[str, str]:
     requisites_found = bool(inn or entity_type)
 
@@ -898,6 +996,9 @@ def _detect_parse_status(
     if entity_type:
         return "NEEDS_REVIEW", "Есть признаки реквизитов продавца, но ИНН не найден"
 
+    if empty_results_detected:
+        return "NOTHING_FOUND_PAGE", "WB открыл пустую страницу с сообщением 'ничего не найдено'"
+
     if navigated_to_seller_page and page_has_requisites_entrypoints:
         return "SELLER_PAGE_OPENED", "Перешли на страницу продавца, но реквизиты не извлеклись"
 
@@ -914,6 +1015,13 @@ def _detect_parse_status(
 
 def _contains_requisites_text(text: str) -> bool:
     return any(marker in text for marker in ('ИНН', 'ОГРН', 'ОГРНИП', 'Номер регистрации', 'КПП'))
+
+
+def _contains_empty_results_text(*texts: str | None) -> bool:
+    combined_text = _normalize_text("\n".join(filter(None, texts))).lower()
+    if not combined_text:
+        return False
+    return any(pattern in combined_text for pattern in EMPTY_RESULTS_PATTERNS)
 
 
 def _contains_seller_signal(text: str) -> bool:
@@ -1266,6 +1374,9 @@ def _is_plausible_seller_display_name(value: str | None) -> bool:
     if normalized.lower() in IGNORED_SELLER_DISPLAY_NAMES:
         return False
 
+    if _contains_empty_results_text(normalized):
+        return False
+
     if re.fullmatch(r"\d+[.,]\d+", normalized):
         return False
 
@@ -1280,6 +1391,27 @@ def _is_plausible_seller_display_name(value: str | None) -> bool:
 
 def _should_run_deep_recovery(result: InspectResult) -> bool:
     return result.parse_status in {"SELLER_PAGE_OPENED", "PAGE_OPENED_NO_REQUISITES", "NEEDS_REVIEW"}
+
+
+def _page_has_empty_results_state(page: Page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+                (patterns) => {
+                  const text = (document.body?.innerText || '').toLowerCase();
+                  return patterns.some((pattern) => text.includes(pattern));
+                }
+                """,
+                EMPTY_RESULTS_PATTERNS,
+            )
+        )
+    except Exception:
+        try:
+            body_text = page.locator("body").inner_text(timeout=1_500)
+        except Exception:
+            return False
+        return _contains_empty_results_text(body_text)
 
 
 def _run_deep_requisites_recovery(

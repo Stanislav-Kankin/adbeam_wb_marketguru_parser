@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from adbeam_excel_parser.audit_runner import attach_output_file_path, run_excel_audit
 from adbeam_excel_parser.excel_exporter import build_output_path, export_audit_to_excel
 from adbeam_excel_parser.excel_reader import read_excel_summary
+from .excel_merger import merge_excel_files_to_tabs
 from .excel_io import (
     analyze_workbook,
     build_known_seller_batch_row,
@@ -66,6 +67,11 @@ class App:
         self.registry_merge_secondary_var = tk.StringVar()
         self.registry_merge_output_var = tk.StringVar(value=str(Path("output/inn_registry_merged.xlsx")))
         self.registry_summary_var = tk.StringVar(value="Реестр ещё не обновлялся")
+        self.excel_merge_source_var = tk.StringVar()
+        self.excel_merge_output_xlsx_var = tk.StringVar(value=str(Path("output/merged_tabs.xlsx")))
+        self.excel_merge_output_zip_var = tk.StringVar(value=str(Path("output/merged_tabs.zip")))
+        self.excel_merge_create_zip_var = tk.BooleanVar(value=True)
+        self.excel_merge_summary_var = tk.StringVar(value="Объединение Excel ещё не запускалось")
         self.headful_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Готово")
         self.sheet_mode_var = tk.StringVar(value="all")
@@ -155,9 +161,11 @@ class App:
         adbeam_tab = ttk.Frame(notebook, padding=8)
         registry_tab = ttk.Frame(notebook, padding=8)
         kontur_tab = ttk.Frame(notebook, padding=8)
+        excel_merge_tab = ttk.Frame(notebook, padding=8)
         notebook.add(extract_tab, text="Извлечение ИНН")
         notebook.add(registry_tab, text="Реестр ИНН")
         notebook.add(kontur_tab, text="Склейка с Контур")
+        notebook.add(excel_merge_tab, text="Объединение Excel")
         notebook.add(adbeam_tab, text="Аудит сайтов")
         extract_tab.columnconfigure(0, weight=1)
         extract_tab.rowconfigure(4, weight=1)
@@ -193,6 +201,10 @@ class App:
         kontur_tab.columnconfigure(0, weight=1)
         kontur_tab.rowconfigure(0, weight=1)
         self._build_compass_block(kontur_tab).grid(row=0, column=0, sticky="new")
+
+        excel_merge_tab.columnconfigure(0, weight=1)
+        excel_merge_tab.rowconfigure(0, weight=1)
+        self._build_excel_merge_tab(excel_merge_tab).grid(row=0, column=0, sticky="nsew")
         self._restore_settings_to_widgets()
 
     def _build_adbeam_tab(self, parent):
@@ -415,6 +427,68 @@ class App:
             wraplength=450,
             justify="left",
         ).grid(row=4, column=0, columnspan=3, sticky="w")
+        return frame
+
+    def _build_excel_merge_tab(self, parent):
+        frame = ttk.Frame(parent)
+        frame.columnconfigure(0, weight=1)
+
+        source = ttk.LabelFrame(frame, text="Источник", padding=12, style="Card.TLabelframe")
+        source.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        source.columnconfigure(1, weight=1)
+        ttk.Label(source, text="ZIP-архив или папка", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(source, textvariable=self.excel_merge_source_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(source, text="Выбрать ZIP", command=self._choose_excel_merge_zip, style="Secondary.TButton").grid(row=0, column=2, pady=4, padx=(0, 6))
+        ttk.Button(source, text="Выбрать папку", command=self._choose_excel_merge_dir, style="Secondary.TButton").grid(row=0, column=3, pady=4)
+        ttk.Label(
+            source,
+            text="Выбери ZIP-архив или папку с Excel-файлами. Каждый найденный файл станет отдельной вкладкой 1, 2, 3 и так далее.",
+            style="Muted.TLabel",
+            wraplength=900,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        outputs = ttk.LabelFrame(frame, text="Итоговые файлы", padding=12, style="Card.TLabelframe")
+        outputs.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        outputs.columnconfigure(1, weight=1)
+        ttk.Label(outputs, text="Итоговый Excel", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(outputs, textvariable=self.excel_merge_output_xlsx_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(outputs, text="Выбрать", command=self._choose_excel_merge_output_xlsx, style="Secondary.TButton").grid(row=0, column=2, pady=4)
+
+        ttk.Label(outputs, text="Итоговый архив", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(outputs, textvariable=self.excel_merge_output_zip_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(outputs, text="Выбрать", command=self._choose_excel_merge_output_zip, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+
+        ttk.Checkbutton(
+            outputs,
+            text="Упаковать итоговый Excel в ZIP",
+            variable=self.excel_merge_create_zip_var,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        actions = ttk.Frame(frame)
+        actions.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        for index in range(4):
+            actions.columnconfigure(index, weight=1)
+        ttk.Button(
+            actions,
+            text="Объединить Excel",
+            command=lambda: self._run_in_thread(self._action_excel_merge, task_name="Объединение Excel"),
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(actions, text="Открыть итоговый Excel", command=self._open_excel_merge_output_xlsx, style="Secondary.TButton").grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(actions, text="Открыть архив", command=self._open_excel_merge_output_zip, style="Secondary.TButton").grid(row=0, column=2, sticky="ew", padx=6)
+        ttk.Button(actions, text="Очистить статус", command=self._clear_excel_merge_status, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=(6, 0))
+
+        summary = ttk.LabelFrame(frame, text="Статус", padding=12, style="Card.TLabelframe")
+        summary.grid(row=3, column=0, sticky="ew")
+        summary.columnconfigure(0, weight=1)
+        ttk.Label(
+            summary,
+            textvariable=self.excel_merge_summary_var,
+            style="Body.TLabel",
+            justify="left",
+            wraplength=900,
+        ).grid(row=0, column=0, sticky="ew")
         return frame
 
     def _build_registry_tab(self, parent):
@@ -642,11 +716,15 @@ class App:
             self.registry_merge_primary_var,
             self.registry_merge_secondary_var,
             self.registry_merge_output_var,
+            self.excel_merge_source_var,
+            self.excel_merge_output_xlsx_var,
+            self.excel_merge_output_zip_var,
             self.sheet_mode_var,
         ]
         for var in self._tracked_vars:
             var.trace_add("write", lambda *_: self._save_settings())
         self.headful_var.trace_add("write", lambda *_: self._save_settings())
+        self.excel_merge_create_zip_var.trace_add("write", lambda *_: self._save_settings())
 
 
     def _open_registry_path(self) -> None:
@@ -672,6 +750,22 @@ class App:
         if not path.exists():
             raise FileNotFoundError(f"Не найден файл новых ИНН: {path}")
         os.startfile(path)  # type: ignore[attr-defined]
+
+    def _open_excel_merge_output_xlsx(self) -> None:
+        path = Path(self.excel_merge_output_xlsx_var.get().strip() or "output/merged_tabs.xlsx")
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден итоговый Excel: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _open_excel_merge_output_zip(self) -> None:
+        path = Path(self.excel_merge_output_zip_var.get().strip() or "output/merged_tabs.zip")
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден итоговый архив: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _clear_excel_merge_status(self) -> None:
+        self.excel_merge_summary_var.set("Объединение Excel ещё не запускалось")
+        self._save_settings()
 
     @staticmethod
     def _format_duration_hms(seconds: float) -> str:
@@ -717,6 +811,9 @@ class App:
             "registry_merge_primary": self.registry_merge_primary_var,
             "registry_merge_secondary": self.registry_merge_secondary_var,
             "registry_merge_output": self.registry_merge_output_var,
+            "excel_merge_source": self.excel_merge_source_var,
+            "excel_merge_output_xlsx": self.excel_merge_output_xlsx_var,
+            "excel_merge_output_zip": self.excel_merge_output_zip_var,
             "sheet_mode": self.sheet_mode_var,
         }.items():
             value = settings.get(key)
@@ -724,6 +821,8 @@ class App:
                 var.set(value)
         if "headful" in settings:
             self.headful_var.set(bool(settings["headful"]))
+        if "excel_merge_create_zip" in settings:
+            self.excel_merge_create_zip_var.set(bool(settings["excel_merge_create_zip"]))
         loaded = settings.get("selected_sheets")
         if isinstance(loaded, list):
             self._settings_loaded_selected_sheets = [str(x) for x in loaded]
@@ -736,6 +835,9 @@ class App:
         registry_summary = settings.get("registry_summary")
         if isinstance(registry_summary, str) and registry_summary:
             self._set_registry_summary(registry_summary)
+        excel_merge_summary = settings.get("excel_merge_summary")
+        if isinstance(excel_merge_summary, str) and excel_merge_summary:
+            self.excel_merge_summary_var.set(excel_merge_summary)
         adbeam_summary = settings.get("adbeam_summary")
         if isinstance(adbeam_summary, str) and adbeam_summary:
             self.adbeam_summary_var.set(adbeam_summary)
@@ -767,6 +869,11 @@ class App:
                 "registry_merge_primary": self.registry_merge_primary_var.get().strip(),
                 "registry_merge_secondary": self.registry_merge_secondary_var.get().strip(),
                 "registry_merge_output": self.registry_merge_output_var.get().strip(),
+                "excel_merge_source": self.excel_merge_source_var.get().strip(),
+                "excel_merge_output_xlsx": self.excel_merge_output_xlsx_var.get().strip(),
+                "excel_merge_output_zip": self.excel_merge_output_zip_var.get().strip(),
+                "excel_merge_create_zip": bool(self.excel_merge_create_zip_var.get()),
+                "excel_merge_summary": self.excel_merge_summary_var.get(),
                 "registry_batch_files": list(self._registry_batch_files),
                 "registry_summary": self.registry_summary_var.get(),
                 "sheet_mode": self.sheet_mode_var.get(),
@@ -936,6 +1043,39 @@ class App:
         )
         if path:
             self.registry_merge_output_var.set(path)
+
+    def _choose_excel_merge_zip(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Выбери ZIP-архив с Excel-файлами",
+            filetypes=[("ZIP archive", "*.zip"), ("All files", "*.*")],
+        )
+        if path:
+            self.excel_merge_source_var.set(path)
+
+    def _choose_excel_merge_dir(self) -> None:
+        path = filedialog.askdirectory(title="Выбери папку с Excel-файлами")
+        if path:
+            self.excel_merge_source_var.set(path)
+
+    def _choose_excel_merge_output_xlsx(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить итоговый Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=Path(self.excel_merge_output_xlsx_var.get()).name,
+        )
+        if path:
+            self.excel_merge_output_xlsx_var.set(path)
+
+    def _choose_excel_merge_output_zip(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить ZIP-архив",
+            defaultextension=".zip",
+            filetypes=[("ZIP archive", "*.zip")],
+            initialfile=Path(self.excel_merge_output_zip_var.get()).name,
+        )
+        if path:
+            self.excel_merge_output_zip_var.set(path)
 
     def _start_import_history_from_registry(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -1416,6 +1556,46 @@ class App:
             "Batch завершён. История sellers уже обновлена автоматически. Добавить этот batch_results.xlsx ещё и во вкладку реестра ИНН?",
         ):
             self._add_registry_batch_paths([batch_output])
+
+    def _action_excel_merge(self) -> None:
+        source_value = self.excel_merge_source_var.get().strip()
+        if not source_value:
+            raise ValueError("Сначала выбери ZIP-архив или папку с Excel-файлами")
+
+        source_path = Path(source_value)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Источник не найден: {source_path}")
+
+        output_xlsx_path = Path(self.excel_merge_output_xlsx_var.get().strip() or "output/merged_tabs.xlsx")
+        output_zip_path = Path(self.excel_merge_output_zip_var.get().strip() or "output/merged_tabs.zip")
+        create_zip = bool(self.excel_merge_create_zip_var.get())
+
+        self._append_log(f"Excel Merge: source={source_path}\n")
+        self._append_log(f"Excel Merge: output_xlsx={output_xlsx_path}\n")
+        self._append_log(f"Excel Merge: create_zip={create_zip}\n")
+        if create_zip:
+            self._append_log(f"Excel Merge: output_zip={output_zip_path}\n")
+
+        summary = merge_excel_files_to_tabs(
+            source_path=source_path,
+            output_xlsx_path=output_xlsx_path,
+            output_zip_path=output_zip_path if create_zip else None,
+            create_zip=create_zip,
+        )
+
+        zip_line = summary["output_zip_path"] or "не создавался"
+        text = (
+            f"Источник: {summary['source_path']}\n"
+            f"Файлов найдено: {summary['files_found']}\n"
+            f"Листов создано: {summary['sheets_created']}\n"
+            f"Итоговый Excel: {summary['output_xlsx_path']}\n"
+            f"Итоговый архив: {zip_line}"
+        )
+        self.excel_merge_summary_var.set(text)
+        self._append_log("Excel Merge: объединение завершено\n")
+        self._append_log(text + "\n")
+        self._save_settings()
+        self.root.after(0, lambda: messagebox.showinfo("Объединение Excel завершено", text))
 
     def _action_merge_registries(self) -> None:
         primary_registry_path = Path(self.registry_merge_primary_var.get().strip() or self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
