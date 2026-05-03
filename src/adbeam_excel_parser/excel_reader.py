@@ -3,6 +3,7 @@ from __future__ import annotations
 import warnings
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from openpyxl import load_workbook
 
@@ -39,7 +40,7 @@ def read_excel_summary(file_path: Path) -> ExcelReadSummary:
         headers = [normalize_header(value, index) for index, value in enumerate(header_row, start=1)]
         preferred_website_column_indexes = detect_preferred_website_columns(headers)
         website_column_indexes = preferred_website_column_indexes or detect_website_columns(headers)
-        allow_row_fallback = not preferred_website_column_indexes
+        allow_row_fallback = not website_column_indexes
 
         total_rows = 0
         rows_with_websites = 0
@@ -93,7 +94,7 @@ def extract_website_rows(file_path: Path) -> ExcelWebsiteRows:
         headers = [normalize_header(value, index) for index, value in enumerate(header_row, start=1)]
         preferred_website_column_indexes = detect_preferred_website_columns(headers)
         website_column_indexes = preferred_website_column_indexes or detect_website_columns(headers)
-        allow_row_fallback = not preferred_website_column_indexes
+        allow_row_fallback = not website_column_indexes
 
         total_rows = 0
         rows: list[WebsiteRow] = []
@@ -224,9 +225,25 @@ def looks_like_website(value: str) -> bool:
     if not value:
         return False
 
-    lower_value = value.lower()
+    lower_value = value.strip().lower()
 
-    if lower_value.startswith(URL_PREFIXES):
-        return True
+    if "@" in lower_value or any(character.isspace() for character in lower_value):
+        return False
 
-    return "." in lower_value and " " not in lower_value and len(lower_value) >= 4
+    candidate = lower_value
+    if not candidate.startswith(("http://", "https://")):
+        if not candidate.startswith("www.") and "." not in candidate:
+            return False
+        candidate = f"https://{candidate}"
+
+    parsed = urlparse(candidate)
+    host = (parsed.hostname or "").strip(".")
+    if not host or "." not in host:
+        return False
+
+    labels = host.split(".")
+    if any(not label for label in labels):
+        return False
+
+    top_level_domain = labels[-1]
+    return len(top_level_domain) >= 2 and any(character.isalpha() for character in top_level_domain)
