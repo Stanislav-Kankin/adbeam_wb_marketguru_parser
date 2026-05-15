@@ -35,6 +35,9 @@ class IcpAutoSearchTests(unittest.TestCase):
         self.assertIn("https://master-om.com/", build_direct_domain_urls("Мастерская Олеси Мустаевой"))
         self.assertIn("https://trives-spb.ru/", build_direct_domain_urls("Trives"))
         self.assertIn("https://venoshop.ru/", build_direct_domain_urls("Venoteks"))
+        self.assertIn("https://theblackpearl.ru/", build_direct_domain_urls("Черный Жемчуг"))
+        self.assertIn("https://estel.beauty/", build_direct_domain_urls("Юникосметик"))
+        self.assertIn("https://chistayalinia.ru/", build_direct_domain_urls("Чистая Линия"))
 
     def test_domain_zone_prefers_ru_for_russian_base(self) -> None:
         self.assertGreater(score_domain_zone("example.ru"), score_domain_zone("example.fr"))
@@ -55,6 +58,48 @@ class IcpAutoSearchTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(score, 45)
+
+    def test_multiword_brand_rejects_generic_partial_match(self) -> None:
+        self.assertLess(
+            score_search_candidate(
+                brand="Doctor Wax Russia",
+                segment="АВТОТОВАРЫ, МАСЛА, ИНСТРУМЕНТ DIY",
+                url="https://doctor.ru/",
+                title="Доктор.ру - портал о здоровье",
+                snippet=None,
+            ),
+            0,
+        )
+        self.assertLess(
+            score_search_candidate(
+                brand="Магнит / магнитные доски Iqaktiv",
+                segment="БЫТОВАЯ ТЕХНИКА И ЭЛЕКТРОНИКА",
+                url="https://magnit.ru/",
+                title="Доставка продуктов на дом - Магнит",
+                snippet="Купить готовую еду и продукты в Магнит",
+            ),
+            0,
+        )
+        self.assertLess(
+            score_search_candidate(
+                brand="Magnit",
+                segment="БЫТОВАЯ ТЕХНИКА И ЭЛЕКТРОНИКА",
+                url="https://www.magnit.com/ru/",
+                title="Magnit",
+                snippet=None,
+            ),
+            0,
+        )
+        self.assertLess(
+            score_search_candidate(
+                brand="Magnit",
+                segment="БЫТОВАЯ ТЕХНИКА И ЭЛЕКТРОНИКА",
+                url="https://magnit.ru/",
+                title="Доставка продуктов на дом - Магнит",
+                snippet="Купить готовую еду и продукты в Магнит",
+            ),
+            0,
+        )
 
     def test_cosmetics_segment_penalizes_wrong_game_candidate(self) -> None:
         score = score_search_candidate(

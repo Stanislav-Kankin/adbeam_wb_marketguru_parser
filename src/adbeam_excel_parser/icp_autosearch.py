@@ -43,7 +43,8 @@ REQUEST_TIMEOUT_SECONDS = 8.0
 DIRECT_DOMAIN_TIMEOUT_SECONDS = 2.0
 CONTACT_PAGE_TIMEOUT_SECONDS = 3.0
 AUTOSEARCH_WORKERS = 4
-DIRECT_DOMAIN_WORKERS = 4
+DIRECT_DOMAIN_WORKERS = 8
+SEARCH_TIMEOUT_SECONDS = 2.0
 DUCKDUCKGO_SEARCH_URL = "https://duckduckgo.com/html/"
 GOOGLE_SEARCH_URL = "https://www.google.com/search"
 
@@ -78,10 +79,10 @@ CONTACT_TEXT_TERMS = (
 COMMON_CONTACT_PATHS = (
     "/contacts/",
     "/contacts",
-    "/contact/",
-    "/contact",
     "/kontakty/",
     "/kontakty",
+    "/contact/",
+    "/contact",
     "/about/",
     "/about",
     "/company/",
@@ -108,6 +109,7 @@ BLOCKED_DOMAINS = (
     "telegram.me",
     "facebook.com",
     "youtube.com",
+    "reg.ru",
 )
 SOCIAL_DOMAINS = (
     "t.me",
@@ -130,10 +132,27 @@ BRAND_DESCRIPTOR_STOPWORDS = {
     "makeup",
     "moscow",
     "official",
+    "russia",
+    "россия",
     "kosmetika",
     "kosmetiki",
     "kosmeticheskaya",
 }
+BRAND_DOMAIN_ALIASES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("trives",), ("trives-spb.ru", "trives-shop.ru")),
+    (("черный", "жемчуг"), ("theblackpearl.ru",)),
+    (("чёрный", "жемчуг"), ("theblackpearl.ru",)),
+    (("юникосметик",), ("estel.beauty", "estel.pro")),
+    (("юниккосметик",), ("estel.beauty", "estel.pro")),
+    (("чистая", "линия"), ("chistayalinia.ru",)),
+    (("невская", "косметика"), ("nevcos.ru",)),
+    (("свобода",), ("svobodako.ru",)),
+    (("compliment",), ("compliment.su",)),
+    (("бабушка", "агаф"), ("1reshenie.ru",)),
+    (("рецепты", "бабушки", "агаф"), ("1reshenie.ru",)),
+    (("r.o.c.s",), ("rocs.ru",)),
+    (("rocs",), ("rocs.ru",)),
+)
 CYRILLIC_TRANSLIT = str.maketrans(
     {
         "а": "a",
@@ -279,7 +298,7 @@ def run_icp_autosearch(
 
 
 def enrich_company_worker(row: dict[str, object]) -> IcpAutoSearchResult:
-    with httpx.Client(follow_redirects=True, timeout=REQUEST_TIMEOUT_SECONDS, headers=DEFAULT_HEADERS) as client:
+    with httpx.Client(follow_redirects=True, timeout=REQUEST_TIMEOUT_SECONDS, headers=DEFAULT_HEADERS, verify=False) as client:
         return enrich_company_from_open_sources(client, row)
 
 
@@ -387,7 +406,7 @@ def search_google_candidates(
 
     for query in build_search_queries(brand, segment):
         try:
-            response = client.get(GOOGLE_SEARCH_URL, params={"q": query, "hl": "ru"})
+            response = client.get(GOOGLE_SEARCH_URL, params={"q": query, "hl": "ru"}, timeout=SEARCH_TIMEOUT_SECONDS)
             response.raise_for_status()
         except httpx.HTTPError:
             continue
@@ -425,7 +444,7 @@ def search_duckduckgo_candidates(
 
     for query in build_search_queries(brand, segment):
         try:
-            response = client.get(DUCKDUCKGO_SEARCH_URL, params={"q": query})
+            response = client.get(DUCKDUCKGO_SEARCH_URL, params={"q": query}, timeout=SEARCH_TIMEOUT_SECONDS)
             response.raise_for_status()
         except httpx.HTTPError:
             continue
@@ -554,6 +573,8 @@ def add_direct_candidate(
 
     title = extract_title_from_html(page.html) or urlparse(page.url).netloc
     score = score_search_candidate(brand=brand, segment=segment, url=page.url, title=title, snippet="direct domain guess") + 18
+    if is_brand_alias_domain(brand, page.url):
+        score = max(score, 68)
     if score < 35:
         return False
     if score <= 0:
@@ -571,6 +592,16 @@ def add_direct_candidate(
     return True
 
 
+def is_brand_alias_domain(brand: str, url: str) -> bool:
+    domain = extract_domain(url)
+    if not domain:
+        return False
+
+    aliases = brand_domain_aliases(normalize_brand_for_domain_variants(brand))
+    normalized_aliases = {alias.casefold().removeprefix("www.") for alias in aliases}
+    return domain.casefold().removeprefix("www.") in normalized_aliases
+
+
 def fetch_direct_html(url: str) -> FetchedHtml | None:
     try:
         response = httpx.get(
@@ -578,6 +609,7 @@ def fetch_direct_html(url: str) -> FetchedHtml | None:
             follow_redirects=True,
             timeout=DIRECT_DOMAIN_TIMEOUT_SECONDS,
             headers=DEFAULT_HEADERS,
+            verify=False,
         )
     except httpx.HTTPError:
         return None
@@ -598,6 +630,9 @@ def build_direct_domain_urls(brand: str) -> list[str]:
     for variant in url_variants:
         if len(variant) < 3:
             continue
+        if "." in variant:
+            result.append(f"https://{variant}/")
+            continue
         suffixes = ("com", "ru") if re.search(r"-[a-z]{1,2}$", variant) else ("ru", "com")
         for suffix in suffixes:
             result.append(f"https://{variant}.{suffix}/")
@@ -610,10 +645,11 @@ def select_direct_domain_url_variants(variants: list[str]) -> list[str]:
         for variant in variants
         if not variant.endswith(("products", "-products"))
     ]
-    selected = list(base_variants[:8])
-    for variant in base_variants[:4]:
+    selected = list(base_variants[:2])
+    for variant in base_variants[:2]:
         selected.append(f"{variant}products")
         selected.append(f"{variant}-products")
+    selected.extend(base_variants[2:8])
     return unique_values(selected)[:16]
 
 
@@ -622,6 +658,7 @@ def build_direct_domain_variants(brand: str) -> list[str]:
     without_amp = re.sub(r"[&+]", " ", lowered)
     with_and = re.sub(r"[&+]", " and ", lowered)
     token_lists: list[list[str]] = []
+    base_variants: list[str] = brand_domain_aliases(lowered)
 
     source_values = [without_amp, with_and]
     for value in (without_amp, with_and):
@@ -638,12 +675,11 @@ def build_direct_domain_variants(brand: str) -> list[str]:
             filtered = [token for token in tokens if token not in BRAND_DESCRIPTOR_STOPWORDS and token not in {"and", "the"}]
             if filtered:
                 token_lists.append(filtered)
-                if len(filtered[0]) >= 5:
+                if len(filtered) == 1 and len(filtered[0]) >= 5:
                     token_lists.append(filtered[:1])
                 token_lists.append(filtered[:2])
             token_lists.append(tokens)
 
-    base_variants: list[str] = []
     for tokens in token_lists:
         if not tokens:
             continue
@@ -670,6 +706,14 @@ def normalize_brand_for_domain_variants(brand: str) -> str:
     value = brand.casefold()
     value = value.replace("'", "").replace("’", "").replace("`", "")
     return value
+
+
+def brand_domain_aliases(lowered_brand: str) -> list[str]:
+    aliases: list[str] = []
+    for required_terms, domains in BRAND_DOMAIN_ALIASES:
+        if all(term in lowered_brand for term in required_terms):
+            aliases.extend(domains)
+    return aliases
 
 
 def transliterate_cyrillic(value: str) -> str:
@@ -714,6 +758,12 @@ def build_transliterated_domain_variants(tokens: list[str]) -> list[str]:
     if shortened != tokens:
         variants.append("".join(shortened))
         variants.append("-".join(shortened))
+
+    joined = "".join(tokens)
+    dashed = "-".join(tokens)
+    for value in (joined, dashed):
+        if "iya" in value:
+            variants.append(value.replace("iya", "ia"))
 
     return unique_values([variant for variant in variants if len(variant) >= 3])
 
@@ -842,7 +892,10 @@ def score_search_candidate(brand: str, segment: str, url: str, title: str, snipp
 
     parsed = urlparse(url)
     haystack = f"{parsed.netloc} {parsed.path} {title} {snippet or ''}".casefold()
+    if is_known_false_positive(brand, segment, domain, haystack):
+        return -100
     tokens = brand_tokens(brand)
+
     score = 0
     token_matches = 0
 
@@ -874,6 +927,22 @@ def score_search_candidate(brand: str, segment: str, url: str, title: str, snipp
     return score
 
 
+def is_known_false_positive(brand: str, segment: str, domain: str, haystack: str) -> bool:
+    brand_lower = brand.casefold()
+    domain_lower = domain.casefold().removeprefix("www.")
+
+    if "doctor wax" in brand_lower and domain_lower == "doctor.ru":
+        return True
+    if not is_food_segment(segment) and ("magnit" in brand_lower or "магнит" in brand_lower):
+        return True
+    if domain_lower == "reg.ru":
+        return True
+    if "domain/shop" in haystack or "домен прода" in haystack:
+        return True
+
+    return False
+
+
 def score_domain_zone(netloc: str) -> int:
     host = netloc.casefold().removeprefix("www.")
     if host.endswith(".ru") or host.endswith(".рф") or host.endswith(".xn--p1ai"):
@@ -894,6 +963,11 @@ def score_segment_fit(segment: str, haystack: str) -> int:
         if any(term in haystack for term in ("одеж", "обув", "fashion", "wear", "shoes", "textile")):
             return 15
     return 0
+
+
+def is_food_segment(segment: str) -> bool:
+    segment_lower = segment.casefold()
+    return any(term in segment_lower for term in ("продукт", "еда", "питани", "food", "grocery"))
 
 
 def brand_tokens(brand: str) -> list[str]:
@@ -1273,7 +1347,7 @@ def is_useful_email(value: str) -> bool:
         return False
     if domain.startswith("example.") or domain in {"example.ru", "example.com"}:
         return False
-    if "sentry.io" in domain or "ingest." in domain:
+    if "sentry" in domain or "ingest." in domain:
         return False
     return not any(lowered.endswith(extension) for extension in (".png", ".jpg", ".jpeg", ".gif", ".webp"))
 
