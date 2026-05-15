@@ -14,8 +14,17 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from adbeam_excel_parser.audit_runner import attach_output_file_path, run_excel_audit
+from adbeam_excel_parser.conference_contacts import (
+    build_icp_contacts_output_path,
+    export_icp_contacts_queue,
+    read_icp_contacts_summary,
+)
 from adbeam_excel_parser.excel_exporter import build_output_path, export_audit_to_excel
 from adbeam_excel_parser.excel_reader import read_excel_summary
+from adbeam_excel_parser.icp_autosearch import (
+    build_icp_autosearch_output_path,
+    run_icp_autosearch,
+)
 from .excel_merger import merge_excel_files_to_tabs
 from .excel_io import (
     analyze_workbook,
@@ -82,6 +91,14 @@ class App:
         self.adbeam_output_path_var = tk.StringVar()
         self.adbeam_summary_var = tk.StringVar(value="AdBeam аудит ещё не запускался")
         self.adbeam_progress_var = tk.StringVar(value="Ожидание Excel-файла для аудита сайтов")
+        self.conference_input_path_var = tk.StringVar()
+        self.conference_output_path_var = tk.StringVar(value=str(Path("output/icp1_contacts_queue.xlsx")))
+        self.conference_autosearch_output_path_var = tk.StringVar(value=str(Path("output/icp1_autosearch.xlsx")))
+        self.conference_autosearch_limit_var = tk.StringVar(value="1200")
+        self.conference_autosearch_delay_var = tk.StringVar(value="1.5")
+        self.conference_autosearch_only_p1_var = tk.BooleanVar(value=False)
+        self.conference_summary_var = tk.StringVar(value="Конференция ICP-1 ещё не запускалась")
+        self.conference_progress_var = tk.StringVar(value="Ожидание Excel-файла со списком компаний")
         self.clock_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Ожидание запуска")
         self.progress_detail_var = tk.StringVar(value="Прогресс появится во время пакетного прогона")
@@ -158,6 +175,7 @@ class App:
         notebook.grid(row=1, column=0, sticky="nsew")
 
         extract_tab = ttk.Frame(notebook, padding=8)
+        conference_tab = ttk.Frame(notebook, padding=8)
         adbeam_tab = ttk.Frame(notebook, padding=8)
         registry_tab = ttk.Frame(notebook, padding=8)
         kontur_tab = ttk.Frame(notebook, padding=8)
@@ -167,6 +185,7 @@ class App:
         notebook.add(kontur_tab, text="Склейка с Контур")
         notebook.add(excel_merge_tab, text="Объединение Excel")
         notebook.add(adbeam_tab, text="Аудит сайтов")
+        notebook.add(conference_tab, text="Конференция ICP-1")
         extract_tab.columnconfigure(0, weight=1)
         extract_tab.rowconfigure(4, weight=1)
 
@@ -190,6 +209,10 @@ class App:
 
         self._build_status_log_block(extract_tab).grid(row=4, column=0, sticky="nsew")
 
+        conference_tab.columnconfigure(0, weight=1)
+        conference_tab.rowconfigure(0, weight=1)
+        self._build_conference_tab(conference_tab).grid(row=0, column=0, sticky="nsew")
+
         adbeam_tab.columnconfigure(0, weight=1)
         adbeam_tab.rowconfigure(0, weight=1)
         self._build_adbeam_tab(adbeam_tab).grid(row=0, column=0, sticky="nsew")
@@ -206,6 +229,88 @@ class App:
         excel_merge_tab.rowconfigure(0, weight=1)
         self._build_excel_merge_tab(excel_merge_tab).grid(row=0, column=0, sticky="nsew")
         self._restore_settings_to_widgets()
+
+    def _build_conference_tab(self, parent):
+        frame = ttk.Frame(parent)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
+
+        source = ttk.LabelFrame(frame, text="Конференция ICP-1: очередь обогащения 1200 компаний", padding=12, style="Card.TLabelframe")
+        source.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        source.columnconfigure(1, weight=1)
+
+        ttk.Label(source, text="Входной Excel", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(source, textvariable=self.conference_input_path_var).grid(row=0, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(source, text="Выбрать файл", command=self._choose_conference_input_file, style="Secondary.TButton").grid(row=0, column=2, pady=4)
+
+        ttk.Label(source, text="Очередь Excel", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(source, textvariable=self.conference_output_path_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(source, text="Выбрать", command=self._choose_conference_output_file, style="Secondary.TButton").grid(row=1, column=2, pady=4)
+
+        ttk.Label(source, text="Автопоиск Excel", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(source, textvariable=self.conference_autosearch_output_path_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=4)
+        ttk.Button(source, text="Выбрать", command=self._choose_conference_autosearch_output_file, style="Secondary.TButton").grid(row=2, column=2, pady=4)
+
+        options = ttk.Frame(source)
+        options.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Label(options, text="Лимит строк", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Entry(options, textvariable=self.conference_autosearch_limit_var, width=8).grid(row=0, column=1, sticky="w", padx=(8, 18))
+        ttk.Label(options, text="Пауза, сек", style="Body.TLabel").grid(row=0, column=2, sticky="w")
+        ttk.Entry(options, textvariable=self.conference_autosearch_delay_var, width=8).grid(row=0, column=3, sticky="w", padx=(8, 18))
+        ttk.Checkbutton(options, text="Только P1", variable=self.conference_autosearch_only_p1_var).grid(row=0, column=4, sticky="w")
+
+        actions = ttk.Frame(source)
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        for index in range(5):
+            actions.columnconfigure(index, weight=1)
+        ttk.Button(
+            actions,
+            text="Проверить базу",
+            command=lambda: self._run_in_thread(self._action_conference_analyze, task_name="ICP-1 анализ базы"),
+            style="Secondary.TButton",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(
+            actions,
+            text="Автопоиск сайтов",
+            command=lambda: self._run_in_thread(self._action_conference_autosearch, task_name="ICP-1 автопоиск"),
+            style="Primary.TButton",
+        ).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(
+            actions,
+            text="Создать очередь 1200",
+            command=lambda: self._run_in_thread(self._action_conference_export, task_name="ICP-1 очередь контактов"),
+            style="Secondary.TButton",
+        ).grid(row=0, column=2, sticky="ew", padx=6)
+        ttk.Button(actions, text="Открыть автопоиск", command=self._open_conference_autosearch_output_file, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=6)
+        ttk.Button(actions, text="Очистить вывод", command=self._clear_conference_output, style="Secondary.TButton").grid(row=0, column=4, sticky="ew", padx=(6, 0))
+
+        summary = ttk.LabelFrame(frame, text="Статус", padding=12, style="Card.TLabelframe")
+        summary.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        summary.columnconfigure(0, weight=1)
+        ttk.Label(summary, textvariable=self.conference_summary_var, style="Body.TLabel", justify="left").grid(row=0, column=0, sticky="ew")
+        ttk.Label(summary, textvariable=self.conference_progress_var, style="Muted.TLabel", justify="left").grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        output = ttk.LabelFrame(frame, text="JSON-результат", padding=12, style="Card.TLabelframe")
+        output.grid(row=2, column=0, sticky="nsew")
+        output.columnconfigure(0, weight=1)
+        output.rowconfigure(0, weight=1)
+        self.conference_output_text = tk.Text(
+            output,
+            wrap="word",
+            bg="#ffffff",
+            fg="#1f2a37",
+            insertbackground="#1f2a37",
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="#dbe4f0",
+            relief="solid",
+            font=("Consolas", 10),
+        )
+        self.conference_output_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(output, orient="vertical", command=self.conference_output_text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.conference_output_text.configure(yscrollcommand=scrollbar.set)
+        return frame
 
     def _build_adbeam_tab(self, parent):
         frame = ttk.Frame(parent)
@@ -699,6 +804,11 @@ class App:
         self._tracked_vars = [
             self.input_path_var,
             self.sample_output_var,
+            self.conference_input_path_var,
+            self.conference_output_path_var,
+            self.conference_autosearch_output_path_var,
+            self.conference_autosearch_limit_var,
+            self.conference_autosearch_delay_var,
             self.adbeam_input_path_var,
             self.adbeam_output_path_var,
             self.artifacts_dir_var,
@@ -725,6 +835,7 @@ class App:
             var.trace_add("write", lambda *_: self._save_settings())
         self.headful_var.trace_add("write", lambda *_: self._save_settings())
         self.excel_merge_create_zip_var.trace_add("write", lambda *_: self._save_settings())
+        self.conference_autosearch_only_p1_var.trace_add("write", lambda *_: self._save_settings())
 
 
     def _open_registry_path(self) -> None:
@@ -794,6 +905,11 @@ class App:
         for key, var in {
             "input_path": self.input_path_var,
             "sample_output": self.sample_output_var,
+            "conference_input_path": self.conference_input_path_var,
+            "conference_output_path": self.conference_output_path_var,
+            "conference_autosearch_output_path": self.conference_autosearch_output_path_var,
+            "conference_autosearch_limit": self.conference_autosearch_limit_var,
+            "conference_autosearch_delay": self.conference_autosearch_delay_var,
             "adbeam_input_path": self.adbeam_input_path_var,
             "adbeam_output_path": self.adbeam_output_path_var,
             "artifacts_dir": self.artifacts_dir_var,
@@ -823,6 +939,8 @@ class App:
             self.headful_var.set(bool(settings["headful"]))
         if "excel_merge_create_zip" in settings:
             self.excel_merge_create_zip_var.set(bool(settings["excel_merge_create_zip"]))
+        if "conference_autosearch_only_p1" in settings:
+            self.conference_autosearch_only_p1_var.set(bool(settings["conference_autosearch_only_p1"]))
         loaded = settings.get("selected_sheets")
         if isinstance(loaded, list):
             self._settings_loaded_selected_sheets = [str(x) for x in loaded]
@@ -841,6 +959,9 @@ class App:
         adbeam_summary = settings.get("adbeam_summary")
         if isinstance(adbeam_summary, str) and adbeam_summary:
             self.adbeam_summary_var.set(adbeam_summary)
+        conference_summary = settings.get("conference_summary")
+        if isinstance(conference_summary, str) and conference_summary:
+            self.conference_summary_var.set(conference_summary)
         registry_batch_files = settings.get("registry_batch_files")
         if isinstance(registry_batch_files, list):
             self._registry_batch_files = [str(path) for path in registry_batch_files]
@@ -851,6 +972,13 @@ class App:
             data = {
                 "input_path": self.input_path_var.get().strip(),
                 "sample_output": self.sample_output_var.get().strip(),
+                "conference_input_path": self.conference_input_path_var.get().strip(),
+                "conference_output_path": self.conference_output_path_var.get().strip(),
+                "conference_autosearch_output_path": self.conference_autosearch_output_path_var.get().strip(),
+                "conference_autosearch_limit": self.conference_autosearch_limit_var.get().strip(),
+                "conference_autosearch_delay": self.conference_autosearch_delay_var.get().strip(),
+                "conference_autosearch_only_p1": bool(self.conference_autosearch_only_p1_var.get()),
+                "conference_summary": self.conference_summary_var.get(),
                 "adbeam_input_path": self.adbeam_input_path_var.get().strip(),
                 "adbeam_output_path": self.adbeam_output_path_var.get().strip(),
                 "adbeam_summary": self.adbeam_summary_var.get(),
@@ -923,6 +1051,43 @@ class App:
             self.adbeam_summary_var.set("Файл выбран. Можно проверить Excel или запустить аудит сайтов.")
             self.adbeam_progress_var.set("Ожидание запуска")
             self._save_settings()
+
+    def _choose_conference_input_file(self) -> None:
+        path = filedialog.askopenfilename(title="Выбери ICP-1 Excel-файл", filetypes=[("Excel", "*.xlsx")])
+        if path:
+            input_path = Path(path)
+            self.conference_input_path_var.set(str(input_path))
+            if not self.conference_output_path_var.get().strip():
+                self.conference_output_path_var.set(str(build_icp_contacts_output_path(input_path)))
+            if not self.conference_autosearch_output_path_var.get().strip():
+                self.conference_autosearch_output_path_var.set(str(build_icp_autosearch_output_path(input_path)))
+            self.conference_summary_var.set("Файл выбран. Можно проверить базу или создать очередь.")
+            self.conference_progress_var.set("Ожидание запуска")
+            self._save_settings()
+
+    def _choose_conference_output_file(self) -> None:
+        current = self.conference_output_path_var.get().strip()
+        initialfile = Path(current).name if current else "icp1_contacts_queue.xlsx"
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить ICP-1 очередь",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=initialfile,
+        )
+        if path:
+            self.conference_output_path_var.set(path)
+
+    def _choose_conference_autosearch_output_file(self) -> None:
+        current = self.conference_autosearch_output_path_var.get().strip()
+        initialfile = Path(current).name if current else "icp1_autosearch.xlsx"
+        path = filedialog.asksaveasfilename(
+            title="Куда сохранить ICP-1 автопоиск",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=initialfile,
+        )
+        if path:
+            self.conference_autosearch_output_path_var.set(path)
 
     def _choose_adbeam_output_file(self) -> None:
         current = self.adbeam_output_path_var.get().strip()
@@ -1171,6 +1336,26 @@ class App:
             raise FileNotFoundError(f"Не найден итоговый AdBeam Excel: {path}")
         os.startfile(path)  # type: ignore[attr-defined]
 
+    def _open_conference_output_file(self) -> None:
+        path = Path(self.conference_output_path_var.get().strip())
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден итоговый ICP-1 Excel: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _open_conference_autosearch_output_file(self) -> None:
+        path = Path(self.conference_autosearch_output_path_var.get().strip())
+        if not path.exists():
+            raise FileNotFoundError(f"Не найден итоговый ICP-1 автопоиск Excel: {path}")
+        os.startfile(path)  # type: ignore[attr-defined]
+
+    def _clear_conference_output(self) -> None:
+        self.conference_output_path_var.set("")
+        self.conference_autosearch_output_path_var.set("")
+        self.conference_summary_var.set("Конференция ICP-1 ещё не запускалась")
+        self.conference_progress_var.set("Ожидание Excel-файла со списком компаний")
+        if hasattr(self, "conference_output_text"):
+            self.conference_output_text.delete("1.0", "end")
+
     def _clear_adbeam_output(self) -> None:
         self.adbeam_output_path_var.set("")
         self.adbeam_summary_var.set("AdBeam аудит ещё не запускался")
@@ -1239,6 +1424,14 @@ class App:
         self.progress_detail_var.set(detail)
         self.progress_percent_var.set(f"{percent:.1f}%")
         self.progress_value_var.set(percent)
+
+    def _set_conference_progress_ui(self, title: str, detail: str, percent: float) -> None:
+        self.conference_progress_var.set(f"{title}\n{detail}")
+        self.progress_text_var.set(title)
+        self.progress_detail_var.set(detail)
+        self.progress_percent_var.set(f"{percent:.1f}%")
+        self.progress_value_var.set(percent)
+
     def _set_batch_progress(self, done: int, total: int, row_number: int | None = None, seller: str | None = None) -> None:
         self._progress_done = done
         self._progress_total = total
@@ -1309,6 +1502,92 @@ class App:
     def _set_adbeam_output(self, text: str) -> None:
         self.adbeam_output_text.delete("1.0", "end")
         self.adbeam_output_text.insert("1.0", text)
+
+    def _action_conference_analyze(self) -> None:
+        input_path = self._require_conference_input_path()
+        summary = read_icp_contacts_summary(input_path)
+        output_text = summary.model_dump_json(indent=2, exclude_none=True)
+        self.root.after(0, lambda output_text=output_text: self._set_conference_output(output_text))
+        self.root.after(0, lambda summary=summary: self.conference_summary_var.set(
+            f"Лист: {summary.sheet_name} | компаний: {summary.total_rows} | "
+            f"с ИНН: {summary.rows_with_inn} | с сайтами: {summary.rows_with_website} | "
+            f"валидация: {summary.validation_rows} | исключения: {summary.excluded_rows}"
+        ))
+        self.root.after(0, lambda: self.conference_progress_var.set("Проверка базы завершена"))
+        self._append_log(
+            f"ICP-1 analyze: sheet={summary.sheet_name}, rows={summary.total_rows}, "
+            f"validation={summary.validation_rows}, excluded={summary.excluded_rows}\n"
+        )
+
+    def _action_conference_export(self) -> None:
+        input_path = self._require_conference_input_path()
+        raw_output_path = self.conference_output_path_var.get().strip()
+        output_path = Path(raw_output_path) if raw_output_path else build_icp_contacts_output_path(input_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        summary = export_icp_contacts_queue(
+            input_path,
+            output_file_path=output_path,
+            progress_callback=self._on_conference_progress,
+        )
+        output_text = summary.model_dump_json(indent=2, exclude_none=True)
+        self.root.after(0, lambda output_text=output_text: self._set_conference_output(output_text))
+        self.root.after(0, lambda output_path=output_path: self.conference_output_path_var.set(str(output_path)))
+        self.root.after(0, lambda summary=summary: self.conference_summary_var.set(
+            f"Создана очередь: {summary.queue_rows} компаний\n"
+            f"Валидация: {summary.validation_rows} | исключения: {summary.excluded_rows}\n"
+            f"Итоговый файл: {summary.output_file_path}"
+        ))
+        self.root.after(0, lambda: self.conference_progress_var.set("Очередь ICP-1 создана"))
+        self._append_log(f"ICP-1 queue: rows={summary.queue_rows}, output={output_path}\n")
+        self.root.after(0, lambda output_path=output_path: messagebox.showinfo("ICP-1 очередь создана", f"Итоговый Excel сохранён:\n{output_path}"))
+
+    def _action_conference_autosearch(self) -> None:
+        input_path = self._require_conference_input_path()
+        raw_output_path = self.conference_autosearch_output_path_var.get().strip()
+        output_path = Path(raw_output_path) if raw_output_path else build_icp_autosearch_output_path(input_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        limit = self._parse_positive_int(self.conference_autosearch_limit_var.get().strip() or "20", "Лимит строк")
+        delay_seconds = self._parse_non_negative_float(
+            self.conference_autosearch_delay_var.get().strip() or "1.5",
+            "Пауза между запросами",
+        )
+
+        summary = run_icp_autosearch(
+            source_file_path=input_path,
+            output_file_path=output_path,
+            limit=limit,
+            delay_seconds=delay_seconds,
+            only_p1=False,
+            progress_callback=self._on_conference_progress,
+        )
+        output_text = summary.model_dump_json(indent=2, exclude_none=True)
+        self.root.after(0, lambda output_text=output_text: self._set_conference_output(output_text))
+        self.root.after(0, lambda output_path=output_path: self.conference_autosearch_output_path_var.set(str(output_path)))
+        self.root.after(0, lambda summary=summary: self.conference_summary_var.set(
+            f"Автопоиск: обработано {summary.processed_rows}/{summary.requested_rows}\n"
+            f"Сайты: {summary.found_websites} | email: {summary.found_emails} | телефоны: {summary.found_phones} | ИНН: {summary.found_inns}\n"
+            f"Высокая уверенность: {summary.high_confidence}\n"
+            f"Итоговый файл: {summary.output_file_path}"
+        ))
+        self.root.after(0, lambda: self.conference_progress_var.set("Автопоиск ICP-1 завершён"))
+        self._append_log(
+            f"ICP-1 autosearch: processed={summary.processed_rows}, websites={summary.found_websites}, "
+            f"emails={summary.found_emails}, phones={summary.found_phones}, output={output_path}\n"
+        )
+        self.root.after(0, lambda output_path=output_path: messagebox.showinfo("ICP-1 автопоиск завершён", f"Итоговый Excel сохранён:\n{output_path}"))
+
+    def _on_conference_progress(self, current: int, total: int, brand: str) -> None:
+        safe_total = max(total, 1)
+        percent = min(current / safe_total * 100.0, 100.0)
+        title = f"ICP-1 очередь: {current}/{total} компаний"
+        detail = f"Текущая компания: {brand}"
+        self.root.after(0, lambda title=title, detail=detail, percent=percent: self._set_conference_progress_ui(title, detail, percent))
+
+    def _set_conference_output(self, text: str) -> None:
+        self.conference_output_text.delete("1.0", "end")
+        self.conference_output_text.insert("1.0", text)
+
     def _action_analyze(self) -> None:
         input_path = self._require_input_path()
         summary = analyze_workbook(input_path)
@@ -1762,6 +2041,16 @@ class App:
         if not input_path.exists():
             raise FileNotFoundError(f"Файл не найден: {input_path}")
         return input_path
+
+    def _require_conference_input_path(self) -> Path:
+        input_value = self.conference_input_path_var.get().strip()
+        if not input_value:
+            raise ValueError("Сначала выбери Excel-файл во вкладке Конференция ICP-1")
+        input_path = Path(input_value)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Файл не найден: {input_path}")
+        return input_path
+
     def _require_input_path(self) -> Path:
         input_value = self.input_path_var.get().strip()
         if not input_value:
@@ -1925,6 +2214,16 @@ class App:
             raise ValueError(f"{field_name}: требуется целое число") from exc
         if value <= 0:
             raise ValueError(f"{field_name}: число должно быть > 0")
+        return value
+
+    @staticmethod
+    def _parse_non_negative_float(raw_value: str, field_name: str) -> float:
+        try:
+            value = float(raw_value.replace(",", "."))
+        except ValueError as exc:
+            raise ValueError(f"{field_name}: требуется число") from exc
+        if value < 0:
+            raise ValueError(f"{field_name}: число должно быть >= 0")
         return value
 
     def _append_log(self, text: str) -> None:
