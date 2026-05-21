@@ -47,6 +47,7 @@ DIRECT_DOMAIN_WORKERS = 8
 SEARCH_TIMEOUT_SECONDS = 2.0
 DUCKDUCKGO_SEARCH_URL = "https://duckduckgo.com/html/"
 GOOGLE_SEARCH_URL = "https://www.google.com/search"
+YANDEX_SEARCH_URL = "https://yandex.ru/search/"
 
 EMAIL_PATTERN = re.compile(r"(?<![\w.+-])[\w.+-]{2,}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?![\w.+-])")
 PHONE_PATTERN = re.compile(r"(?:\+7|8)[\s\-().]*\d{3}[\s\-().]*\d{3}[\s\-().]*\d{2}[\s\-().]*\d{2}")
@@ -370,9 +371,17 @@ def enrich_company_from_open_sources(client: httpx.Client, row: dict[str, object
     )
 
 
-def search_company_candidates(client: httpx.Client, brand: str, segment: str) -> list[SearchCandidate]:
+def search_company_candidates(
+    client: httpx.Client,
+    brand: str,
+    segment: str,
+) -> list[SearchCandidate]:
     candidates: list[SearchCandidate] = []
     seen_urls: set[str] = set()
+
+    search_first_candidates = search_engine_first_result_candidates(client, brand, segment, seen_urls)
+    if search_first_candidates:
+        return search_first_candidates[:MAX_SEARCH_RESULTS]
 
     for candidate in build_direct_domain_candidates(client, brand, segment):
         candidates.append(candidate)
@@ -394,6 +403,108 @@ def search_company_candidates(client: httpx.Client, brand: str, segment: str) ->
 
     candidates.sort(key=lambda item: (-item.score, len(item.url)))
     return candidates[:MAX_SEARCH_RESULTS]
+
+
+def search_engine_first_result_candidates(
+    client: httpx.Client,
+    brand: str,
+    segment: str,
+    seen_urls: set[str],
+) -> list[SearchCandidate]:
+    for search_func in (
+        search_google_first_result_candidates,
+        search_duckduckgo_first_result_candidates,
+        search_yandex_first_result_candidates,
+    ):
+        candidates = search_func(client, brand, segment, seen_urls)
+        if candidates:
+            return candidates
+    return []
+
+
+def search_google_first_result_candidates(
+    client: httpx.Client,
+    brand: str,
+    segment: str,
+    seen_urls: set[str],
+) -> list[SearchCandidate]:
+    candidates: list[SearchCandidate] = []
+    query = build_search_queries(brand, segment)[0]
+    try:
+        response = client.get(GOOGLE_SEARCH_URL, params={"q": query, "hl": "ru", "gl": "ru", "num": "5"}, timeout=SEARCH_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return candidates
+
+    parser = HTMLParser(response.text)
+    for rank, link_node in enumerate(parser.css("div.g a[href], div[data-sokoban-container] a[href], a[href]")):
+        url = unwrap_google_url(link_node.attributes.get("href") or "")
+        if not url:
+            continue
+        title = link_node.text(separator=" ", strip=True)
+        snippet = extract_nearby_text(link_node)
+        if add_google_first_candidate(candidates, seen_urls, brand, segment, url, title, snippet, rank):
+            return candidates
+    return candidates
+
+
+def search_duckduckgo_first_result_candidates(
+    client: httpx.Client,
+    brand: str,
+    segment: str,
+    seen_urls: set[str],
+) -> list[SearchCandidate]:
+    candidates: list[SearchCandidate] = []
+    query = build_search_queries(brand, segment)[0]
+    try:
+        response = client.get(DUCKDUCKGO_SEARCH_URL, params={"q": query}, timeout=SEARCH_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return candidates
+
+    parser = HTMLParser(response.text)
+    for rank, result_node in enumerate(parser.css(".result")):
+        link_node = result_node.css_first("a.result__a")
+        if link_node is None:
+            continue
+        url = unwrap_duckduckgo_url(link_node.attributes.get("href") or "")
+        if not url:
+            continue
+        title = link_node.text(separator=" ", strip=True)
+        snippet_node = result_node.css_first(".result__snippet")
+        snippet = snippet_node.text(separator=" ", strip=True) if snippet_node else None
+        if add_google_first_candidate(candidates, seen_urls, brand, segment, url, title, snippet, rank):
+            return candidates
+    return candidates
+
+
+def search_yandex_first_result_candidates(
+    client: httpx.Client,
+    brand: str,
+    segment: str,
+    seen_urls: set[str],
+) -> list[SearchCandidate]:
+    candidates: list[SearchCandidate] = []
+    query = build_search_queries(brand, segment)[0]
+    try:
+        response = client.get(YANDEX_SEARCH_URL, params={"text": query, "lr": "213"}, timeout=SEARCH_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return candidates
+
+    parser = HTMLParser(response.text)
+    for rank, result_node in enumerate(parser.css(".serp-item, li")):
+        link_node = result_node.css_first("a[href]")
+        if link_node is None:
+            continue
+        url = unwrap_yandex_url(link_node.attributes.get("href") or "")
+        if not url:
+            continue
+        title = link_node.text(separator=" ", strip=True)
+        snippet = extract_nearby_text(link_node)
+        if add_google_first_candidate(candidates, seen_urls, brand, segment, url, title, snippet, rank):
+            return candidates
+    return candidates
 
 
 def search_google_candidates(
@@ -507,6 +618,42 @@ def add_search_candidate(
             snippet=snippet,
             domain=extract_domain(normalized),
             score=score,
+        )
+    )
+    return True
+
+
+def add_google_first_candidate(
+    candidates: list[SearchCandidate],
+    seen_urls: set[str],
+    brand: str,
+    segment: str,
+    url: str,
+    title: str,
+    snippet: str | None,
+    rank: int,
+) -> bool:
+    normalized = normalize_url(url)
+    if not normalized:
+        return False
+    candidate_title = title.strip() or extract_domain(normalized) or normalized
+
+    canonical = canonical_url(normalized)
+    if canonical in seen_urls:
+        return False
+
+    score = score_search_candidate(brand=brand, segment=segment, url=normalized, title=candidate_title, snippet=snippet)
+    if score <= 0:
+        return False
+
+    seen_urls.add(canonical)
+    candidates.append(
+        SearchCandidate(
+            title=candidate_title,
+            url=normalized,
+            snippet=snippet,
+            domain=extract_domain(normalized),
+            score=max(score, 120 - rank),
         )
     )
     return True
@@ -861,6 +1008,28 @@ def unwrap_google_url(raw_url: str) -> str | None:
             target = query.get("q", [""])[0] or query.get("url", [""])[0]
             return unquote(target) if target else None
         return None
+
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return raw_url
+
+    return None
+
+
+def unwrap_yandex_url(raw_url: str) -> str | None:
+    if not raw_url:
+        return None
+
+    if raw_url.startswith("//"):
+        raw_url = "https:" + raw_url
+    elif raw_url.startswith("/"):
+        raw_url = urljoin(YANDEX_SEARCH_URL, raw_url)
+
+    parsed = urlparse(raw_url)
+    domain = extract_domain(raw_url)
+    if domain in {"yandex.ru", "ya.ru"}:
+        query = parse_qs(parsed.query)
+        target = query.get("url", [""])[0] or query.get("to", [""])[0]
+        return unquote(target) if target else None
 
     if parsed.scheme in {"http", "https"} and parsed.netloc:
         return raw_url

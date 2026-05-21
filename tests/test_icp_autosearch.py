@@ -1,5 +1,7 @@
 import unittest
 
+import httpx
+
 from adbeam_excel_parser.icp_autosearch import (
     FetchedHtml,
     build_acronym_variants,
@@ -9,6 +11,7 @@ from adbeam_excel_parser.icp_autosearch import (
     extract_contact_data,
     score_domain_zone,
     score_search_candidate,
+    search_company_candidates,
     unwrap_google_url,
 )
 
@@ -58,6 +61,34 @@ class IcpAutoSearchTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(score, 45)
+
+    def test_search_prefers_google_official_query_order_without_api_key(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "www.google.com":
+                return httpx.Response(
+                    200,
+                    text="""
+                    <html><body>
+                    <div class="g">
+                      <a href="/url?q=https%3A%2F%2Fdoctor.ru%2F&sa=U">Доктор.ру - портал о здоровье</a>
+                    </div>
+                    <div class="g">
+                      <a href="/url?q=https%3A%2F%2Fdoctorwax.ru%2F&sa=U">DoctorWax - официальный сайт</a>
+                    </div>
+                    </body></html>
+                    """,
+                )
+            return httpx.Response(404)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+        candidates = search_company_candidates(
+            client,
+            brand="Doctor Wax Russia",
+            segment="АВТОТОВАРЫ, МАСЛА, ИНСТРУМЕНТ DIY",
+        )
+
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0].url, "https://doctorwax.ru/")
 
     def test_multiword_brand_rejects_generic_partial_match(self) -> None:
         self.assertLess(
