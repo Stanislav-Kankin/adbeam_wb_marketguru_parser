@@ -1923,17 +1923,8 @@ class App:
                     "wb_seller_url": result.seller_url,
                 })
                 if result.parse_status == "ANTI_BOT_PAGE":
-                    save_batch_results(batch_output, output_rows)
                     self._append_log(
-                        f"Batch остановлен на строке {row_number}: WB не загрузил контрольную карточку. "
-                        f"Частичный результат сохранён: {batch_output}\n"
-                    )
-                    raise RuntimeError(
-                        "Wildberries не пропустил контрольную карточку товара. "
-                        "Пакетный прогон остановлен, чтобы не обработать весь список пустыми страницами.\n\n"
-                        f"Строка: {row_number}\n"
-                        f"Частичный результат: {batch_output}\n"
-                        "Закрой браузер WB, подожди несколько минут и повтори проверку одной строки."
+                        f"Batch: строка {row_number} пропущена, WB не загрузил страницу; продолжаю со следующей строкой\n"
                     )
                 if len(output_rows) % 10 == 0:
                     save_batch_results(batch_output, output_rows)

@@ -16,6 +16,7 @@ from .models import InspectResult, ResearchRow
 
 PRODUCT_GOTO_TIMEOUT_MS = 12_000
 PRODUCT_READY_TIMEOUT_MS = 30_000
+FAST_PAGE_READY_TIMEOUT_MS = 15_000
 SELLER_GOTO_TIMEOUT_MS = 12_000
 WAIT_FOR_LOAD_STATE_TIMEOUT_MS = 8_000
 MAX_BATCH_ROW_ATTEMPTS = 3
@@ -411,7 +412,31 @@ def _save_blocked_product_result(
     manual_wait_seconds: int,
     seller_url: str | None = None,
     note: str | None = None,
+    save_diagnostics: bool = True,
 ) -> InspectResult:
+    blocked_note = note or (
+        "WB не загрузил карточку товара и оставил пустую оболочку сайта."
+    )
+    if not save_diagnostics:
+        result = InspectResult(
+            row_number=row_number,
+            url=research_row.wb_candidate_url or "",
+            page_title=_safe_page_title(page),
+            final_url=page.url,
+            http_status=response.status if response else None,
+            parse_status="ANTI_BOT_PAGE",
+            anti_bot_detected=True,
+            used_persistent_profile=profile_dir is not None,
+            profile_dir=str(profile_dir) if profile_dir else None,
+            manual_wait_seconds=manual_wait_seconds,
+            seller_url=seller_url,
+            navigated_to_seller_page=bool(seller_url),
+            seller_display_name=research_row.seller_name_raw,
+            note=blocked_note,
+        )
+        _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=result)
+        return result
+
     try:
         page.screenshot(path=str(screenshot_path), full_page=True)
     except Exception:
@@ -503,7 +528,11 @@ def _inspect_product_row_on_page(
     product_ready = _wait_for_product_page_ready(
         page=page,
         nm_id=research_row.wb_nm_id,
-        timeout_ms=8_000 if response is not None and response.status == 498 else PRODUCT_READY_TIMEOUT_MS,
+        timeout_ms=(
+            8_000
+            if response is not None and response.status == 498
+            else FAST_PAGE_READY_TIMEOUT_MS if fast_success_exit else PRODUCT_READY_TIMEOUT_MS
+        ),
     )
     if not product_ready:
         return _save_blocked_product_result(
@@ -517,6 +546,7 @@ def _inspect_product_row_on_page(
             artifacts_dir=artifacts_dir,
             profile_dir=profile_dir,
             manual_wait_seconds=manual_wait_seconds,
+            save_diagnostics=not fast_success_exit,
         )
 
     _best_effort_wait(page, settle_rounds=1)
@@ -529,6 +559,7 @@ def _inspect_product_row_on_page(
     seller_url, seller_response, seller_page_ready = _go_to_seller_page(
         page,
         expected_seller_name=research_row.seller_name_raw,
+        ready_timeout_ms=FAST_PAGE_READY_TIMEOUT_MS if fast_success_exit else PRODUCT_READY_TIMEOUT_MS,
     )
     if seller_response is not None:
         response = seller_response
@@ -547,6 +578,7 @@ def _inspect_product_row_on_page(
             profile_dir=profile_dir,
             manual_wait_seconds=manual_wait_seconds,
             seller_url=seller_url,
+            save_diagnostics=not fast_success_exit,
             note=(
                 "WB открыл адрес продавца, но не загрузил страницу с реквизитами. "
                 "Пакетный прогон остановлен, чтобы не сохранить пустые результаты."
@@ -580,9 +612,8 @@ def _inspect_product_row_on_page(
         )
         if not fast_result.seller_display_name and research_row.seller_name_raw:
             fast_result.seller_display_name = research_row.seller_name_raw
-        if _has_extracted_requisites(fast_result):
-            _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=fast_result)
-            return fast_result
+        _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=fast_result)
+        return fast_result
 
     html_before_screenshot = _safe_page_content(page)
     captured_tooltip_text = captured_tooltip_text or _extract_tooltip_text_from_page(page) or _extract_tooltip_text_from_html(html_before_screenshot)
@@ -782,6 +813,7 @@ def _terminate_process_tree(pid: int) -> None:
 def _go_to_seller_page(
     page: Page,
     expected_seller_name: str | None = None,
+    ready_timeout_ms: int = PRODUCT_READY_TIMEOUT_MS,
 ) -> tuple[str | None, Response | None, bool]:
     if "/seller/" in page.url:
         raise TransientWBError(f'Page is still on seller URL before seller navigation: {page.url}')
@@ -789,7 +821,7 @@ def _go_to_seller_page(
     discovered_seller_url = _wait_for_seller_link_or_page(page, allow_slug=True)
     if discovered_seller_url is not None:
         if _click_seller_link(page, discovered_seller_url):
-            ready = _wait_for_seller_page_ready(page, expected_seller_name)
+            ready = _wait_for_seller_page_ready(page, expected_seller_name, timeout_ms=ready_timeout_ms)
             return discovered_seller_url, None, ready
         try:
             response = page.goto(
@@ -797,7 +829,7 @@ def _go_to_seller_page(
                 wait_until="commit",
                 timeout=SELLER_GOTO_TIMEOUT_MS,
             )
-            ready = _wait_for_seller_page_ready(page, expected_seller_name)
+            ready = _wait_for_seller_page_ready(page, expected_seller_name, timeout_ms=ready_timeout_ms)
             return discovered_seller_url, response, ready
         except Exception:
             pass
@@ -819,7 +851,7 @@ def _go_to_seller_page(
                         wait_until="commit",
                         timeout=SELLER_GOTO_TIMEOUT_MS,
                     )
-                    ready = _wait_for_seller_page_ready(page, expected_seller_name)
+                    ready = _wait_for_seller_page_ready(page, expected_seller_name, timeout_ms=ready_timeout_ms)
                     return target_url, response, ready
 
                 try:
@@ -845,7 +877,7 @@ def _go_to_seller_page(
                         continue
 
                     if _is_valid_wb_seller_url(navigated_url) or (allow_slug and _is_supported_wb_seller_url(navigated_url)):
-                        ready = _wait_for_seller_page_ready(page, expected_seller_name)
+                        ready = _wait_for_seller_page_ready(page, expected_seller_name, timeout_ms=ready_timeout_ms)
                         return navigated_url, response, ready
 
                     try:

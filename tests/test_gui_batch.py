@@ -111,7 +111,7 @@ class GuiBatchTests(unittest.TestCase):
 
             load_known.assert_not_called()
 
-    def test_batch_stops_and_saves_partial_file_on_antibot(self) -> None:
+    def test_batch_continues_and_saves_antibot_row(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app = App.__new__(App)
@@ -152,9 +152,12 @@ class GuiBatchTests(unittest.TestCase):
                 patch("wb_inn_extractor.gui.read_research_rows_range", return_value=[research_row]),
                 patch("wb_inn_extractor.gui.BatchInspector", return_value=inspector_context),
                 patch("wb_inn_extractor.gui.save_batch_results") as save_results,
+                patch(
+                    "wb_inn_extractor.gui.update_seller_history_from_batch_files",
+                    return_value={"new_seller_added": 0, "history_rows": 0},
+                ),
             ):
-                with self.assertRaisesRegex(RuntimeError, "контрольную карточку"):
-                    app._action_batch()
+                app._action_batch()
 
             save_results.assert_called_once()
             self.assertEqual(save_results.call_args.args[0], root / "batch_results.xlsx")
