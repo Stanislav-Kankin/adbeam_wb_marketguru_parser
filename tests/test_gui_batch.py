@@ -29,6 +29,35 @@ class _Root:
 
 
 class GuiBatchTests(unittest.TestCase):
+    def test_settings_loader_accepts_utf8_bom(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / ".wb_inn_gui_settings.json"
+            settings_path.write_text(
+                '{"profile_dir": "C:/old/wb_profile"}',
+                encoding="utf-8-sig",
+            )
+            app = App.__new__(App)
+
+            with patch("wb_inn_extractor.gui.SETTINGS_PATH", settings_path):
+                app._load_settings()
+
+            self.assertEqual(app._loaded_settings["profile_dir"], "C:/old/wb_profile")
+            self.assertIsNone(app._settings_load_error)
+
+    def test_broken_settings_are_not_overwritten(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / ".wb_inn_gui_settings.json"
+            original = "{broken json"
+            settings_path.write_text(original, encoding="utf-8")
+            app = App.__new__(App)
+
+            with patch("wb_inn_extractor.gui.SETTINGS_PATH", settings_path):
+                app._load_settings()
+                app._save_settings()
+
+            self.assertIsNotNone(app._settings_load_error)
+            self.assertEqual(settings_path.read_text(encoding="utf-8"), original)
+
     def test_batch_progress_updates_header_and_window_title(self) -> None:
         app = App.__new__(App)
         app.root = _Root()

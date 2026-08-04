@@ -115,10 +115,12 @@ class App:
         self._progress_done: int = 0
         self._settings_loaded_selected_sheets: list[str] = []
         self._registry_batch_files: list[str] = []
+        self._settings_load_error: str | None = None
 
         self._configure_theme()
         self._load_settings()
         self._build_ui()
+        self._show_settings_load_error()
         self._bind_settings_save()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick_clock()
@@ -938,12 +940,30 @@ class App:
 
     def _load_settings(self) -> None:
         self._loaded_settings = {}
+        self._settings_load_error = None
         if not SETTINGS_PATH.exists():
             return
         try:
-            self._loaded_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except Exception:
+            loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8-sig"))
+            if not isinstance(loaded, dict):
+                raise ValueError("корневой элемент настроек должен быть объектом")
+            self._loaded_settings = loaded
+        except Exception as exc:
             self._loaded_settings = {}
+            self._settings_load_error = f"Не удалось прочитать {SETTINGS_PATH.resolve()}: {exc}"
+
+    def _show_settings_load_error(self) -> None:
+        if not self._settings_load_error:
+            return
+        error = self._settings_load_error
+        self._append_log(f"[ОШИБКА НАСТРОЕК] {error}\n")
+        self.root.after(
+            0,
+            lambda error=error: messagebox.showerror(
+                "Настройки не загружены",
+                f"{error}\n\nНастройки по умолчанию не будут сохранены поверх файла.",
+            ),
+        )
 
     def _restore_settings_to_widgets(self) -> None:
         settings = getattr(self, "_loaded_settings", {})
@@ -1021,6 +1041,8 @@ class App:
             self._refresh_registry_batch_listbox()
 
     def _save_settings(self) -> None:
+        if self._settings_load_error:
+            return
         try:
             data = {
                 "input_path": self.input_path_var.get().strip(),
