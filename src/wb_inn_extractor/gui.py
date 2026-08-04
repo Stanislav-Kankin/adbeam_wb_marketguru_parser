@@ -167,13 +167,22 @@ class App:
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="WB INN Extractor", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            header,
-            text="Пайплайн: WB → batch_results → реестр ИНН → Контур.Поиск клиентов → final_enriched",
-            style="Muted.TLabel",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(header, textvariable=self.progress_text_var, style="Body.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(4, 0)
+        )
         ttk.Label(header, textvariable=self.clock_var, style="Muted.TLabel").grid(row=0, column=1, sticky="e")
-        ttk.Label(header, textvariable=self.status_var, style="HeaderValue.TLabel").grid(row=1, column=1, sticky="e")
+        header_status = ttk.Frame(header)
+        header_status.grid(row=1, column=1, sticky="e", pady=(4, 0))
+        ttk.Label(header_status, textvariable=self.status_var, style="HeaderValue.TLabel").grid(row=0, column=0)
+        ttk.Label(header_status, textvariable=self.progress_percent_var, style="Body.TLabel").grid(
+            row=0, column=1, padx=(12, 0)
+        )
+        ttk.Progressbar(header, variable=self.progress_value_var, maximum=100, mode="determinate").grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+        )
+        ttk.Label(header, textvariable=self.progress_detail_var, style="Muted.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
 
         notebook = ttk.Notebook(container)
         notebook.grid(row=1, column=0, sticky="nsew")
@@ -190,12 +199,46 @@ class App:
         notebook.add(excel_merge_tab, text="Объединение Excel")
         notebook.add(adbeam_tab, text="Аудит сайтов")
         notebook.add(conference_tab, text="Конференция ICP-1")
+
         extract_tab.columnconfigure(0, weight=1)
-        extract_tab.rowconfigure(4, weight=1)
+        extract_tab.rowconfigure(0, weight=1)
+        self.extract_canvas = tk.Canvas(
+            extract_tab,
+            background="#f4f7fb",
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        self.extract_canvas.grid(row=0, column=0, sticky="nsew")
+        extract_scrollbar = ttk.Scrollbar(extract_tab, orient="vertical", command=self.extract_canvas.yview)
+        extract_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.extract_canvas.configure(yscrollcommand=extract_scrollbar.set)
 
-        self._build_source_block(extract_tab).grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        extract_content = ttk.Frame(self.extract_canvas, padding=(0, 0, 8, 8))
+        extract_content.columnconfigure(0, weight=1)
+        extract_window = self.extract_canvas.create_window((0, 0), window=extract_content, anchor="nw")
+        extract_content.bind(
+            "<Configure>",
+            lambda _event: self.extract_canvas.configure(scrollregion=self.extract_canvas.bbox("all")),
+        )
+        self.extract_canvas.bind(
+            "<Configure>",
+            lambda event: self.extract_canvas.itemconfigure(extract_window, width=event.width),
+        )
 
-        top_grid = ttk.Frame(extract_tab)
+        def scroll_extract(event) -> None:
+            if event.delta:
+                self.extract_canvas.yview_scroll(-int(event.delta / 120), "units")
+
+        self.extract_canvas.bind(
+            "<Enter>", lambda _event: self.extract_canvas.bind_all("<MouseWheel>", scroll_extract)
+        )
+        self.extract_canvas.bind(
+            "<Leave>", lambda _event: self.extract_canvas.unbind_all("<MouseWheel>")
+        )
+
+        self._build_source_block(extract_content).grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        top_grid = ttk.Frame(extract_content)
         top_grid.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
         top_grid.columnconfigure(0, weight=1, uniform="top_halves")
         top_grid.columnconfigure(1, weight=1, uniform="top_halves")
@@ -204,14 +247,14 @@ class App:
         self._build_sheet_block(top_grid).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self._build_sample_block(top_grid).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        mid_grid = ttk.Frame(extract_tab)
+        mid_grid = ttk.Frame(extract_content)
         mid_grid.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         mid_grid.columnconfigure(0, weight=1)
         mid_grid.rowconfigure(0, weight=1)
 
         self._build_wb_block(mid_grid).grid(row=0, column=0, sticky="nsew")
 
-        self._build_status_log_block(extract_tab).grid(row=4, column=0, sticky="nsew")
+        self._build_status_log_block(extract_content).grid(row=4, column=0, sticky="nsew")
 
         conference_tab.columnconfigure(0, weight=1)
         conference_tab.rowconfigure(0, weight=1)
@@ -465,15 +508,8 @@ class App:
             command=lambda: self._run_in_thread(self._action_sample, task_name="Создание sample"),
             style="Primary.TButton",
         ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 8))
-        ttk.Label(
-            frame,
-            text="Создаёт общий sample по выбранным листам, убирает дубли по имени seller. Фильтры можно отключить для чистого перезапуска категории.",
-            style="Muted.TLabel",
-            wraplength=380,
-            justify="left",
-        ).grid(row=4, column=0, columnspan=3, sticky="w")
-        ttk.Label(frame, textvariable=self.sample_summary_var, style="Body.TLabel", justify="left", wraplength=520).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.sample_filter_summary_var, style="Muted.TLabel", justify="left", wraplength=520).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(frame, textvariable=self.sample_summary_var, style="Body.TLabel", justify="left", wraplength=520).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(frame, textvariable=self.sample_filter_summary_var, style="Muted.TLabel", justify="left", wraplength=520).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
         return frame
 
     def _build_wb_block(self, parent):
@@ -689,7 +725,7 @@ class App:
         self.registry_batch_listbox = tk.Listbox(
             list_frame,
             selectmode=tk.EXTENDED,
-            height=10,
+            height=6,
             exportselection=False,
             bg="#ffffff",
             fg="#1f2a37",
@@ -762,7 +798,6 @@ class App:
     def _build_status_log_block(self, parent):
         frame = ttk.LabelFrame(parent, text="6. Статус, прогресс и лог", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(2, weight=1)
 
         top = ttk.Frame(frame)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -963,10 +998,11 @@ class App:
             self.selection_summary_var.set(summary)
         sample_summary = settings.get("sample_summary")
         if isinstance(sample_summary, str) and sample_summary:
-            self.sample_summary_var.set(sample_summary)
+            self.sample_summary_var.set(f"{sample_summary.splitlines()[0]} | старт batch: 2")
         sample_filter_summary = settings.get("sample_filter_summary")
         if isinstance(sample_filter_summary, str) and sample_filter_summary:
-            self.sample_filter_summary_var.set(sample_filter_summary)
+            filter_state = "включены" if self.sample_use_known_sellers_var.get() else "отключены"
+            self.sample_filter_summary_var.set(f"Фильтры повторов: {filter_state}")
         registry_summary = settings.get("registry_summary")
         if isinstance(registry_summary, str) and registry_summary:
             self._set_registry_summary(registry_summary)
@@ -1431,6 +1467,7 @@ class App:
     def _finish_task_ui(self, success: bool, task_name: str, elapsed: float) -> None:
         human_elapsed = self._format_duration_hms(elapsed)
         label = f"{task_name}: завершено за {human_elapsed}" if success else f"{task_name}: завершилось с ошибкой через {human_elapsed}"
+        self.root.title("WB INN Extractor — Research MVP")
         self.progress_text_var.set(label)
         self.progress_detail_var.set("Лог ниже содержит детали последней операции")
         self.progress_percent_var.set("100%" if success else self.progress_percent_var.get())
@@ -1476,6 +1513,9 @@ class App:
         self.progress_detail_var.set(detail)
         self.progress_percent_var.set(f"{percent:.1f}%")
         self.progress_value_var.set(percent)
+        self.root.title(
+            f"WB INN Extractor — {self._progress_done}/{self._progress_total} ({percent:.1f}%)"
+        )
 
     def _action_adbeam_analyze(self) -> None:
         input_path = self._require_adbeam_input_path()
@@ -1679,18 +1719,15 @@ class App:
 
         self.root.after(0, lambda: self.row_var.set("2"))
         sample_summary = (
-            f"Последний sample: {len(rows)} строк\n"
-            f"Без фильтра: {len(unfiltered_rows)} | после фильтра: {len(filtered_rows)} | исключено: {excluded_by_filters}\n"
-            f"Листов в sample: {len(rows_by_sheet)}"
+            f"Sample: {len(rows)} | без фильтра: {len(unfiltered_rows)} | "
+            f"исключено: {excluded_by_filters} | листов: {len(rows_by_sheet)}"
         )
         if limit is not None:
-            sample_summary += f"\nЛимит: {limit}"
-        sample_summary += "\nРекомендуемая стартовая строка для batch: 2"
+            sample_summary += f" | лимит: {limit}"
+        sample_summary += " | старт batch: 2"
         filter_summary = (
             f"Фильтры повторов: {'включены' if use_known_sellers else 'отключены'} | "
-            f"ключей: {len(known_seller_sources)} | cwd: {Path.cwd()}\n"
-            f"Реестр: {registry_resolved}\n"
-            f"История: {seller_history_resolved}"
+            f"ключей: {len(known_seller_sources)} | исключено: {excluded_by_filters}"
         )
         if use_known_sellers and len(unfiltered_rows) > 0 and len(filtered_rows) < len(unfiltered_rows) * 0.25:
             filter_summary += "\nВнимание: фильтры отсекли больше 75% выборки."

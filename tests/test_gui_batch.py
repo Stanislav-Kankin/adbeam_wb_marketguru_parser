@@ -13,13 +13,43 @@ class _Var:
     def get(self):
         return self.value
 
+    def set(self, value):
+        self.value = value
+
 
 class _Root:
+    def __init__(self):
+        self.window_title = ""
+
     def after(self, _delay, _callback):
         return None
 
+    def title(self, value):
+        self.window_title = value
+
 
 class GuiBatchTests(unittest.TestCase):
+    def test_batch_progress_updates_header_and_window_title(self) -> None:
+        app = App.__new__(App)
+        app.root = _Root()
+        app.progress_text_var = _Var("")
+        app.progress_detail_var = _Var("")
+        app.progress_percent_var = _Var("")
+        app.progress_value_var = _Var(0.0)
+        app._progress_done = 40
+        app._progress_total = 200
+
+        app._set_batch_progress_ui(
+            "Пакетный прогон: 40/200 строк | текущая строка 42",
+            "Прошло: 00:10:00 | ETA: 00:40:00 | Среднее: 15.0 сек/строка",
+            20.0,
+        )
+
+        self.assertEqual(app.progress_percent_var.get(), "20.0%")
+        self.assertEqual(app.progress_value_var.get(), 20.0)
+        self.assertIn("ETA: 00:40:00", app.progress_detail_var.get())
+        self.assertEqual(app.root.window_title, "WB INN Extractor — 40/200 (20.0%)")
+
     def test_batch_reads_known_seller_filter_toggle(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
