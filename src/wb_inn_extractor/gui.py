@@ -1744,6 +1744,7 @@ class App:
         batch_output = Path(self.batch_output_var.get())
         registry_path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
         seller_history_path = Path(self.seller_history_path_var.get().strip() or "output/seller_history.xlsx")
+        use_known_sellers = bool(self.sample_use_known_sellers_var.get())
 
         if artifacts_dir.resolve() == profile_dir.resolve():
             raise ValueError("Папка артефактов и папка профиля WB должны быть разными")
