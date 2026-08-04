@@ -1,9 +1,10 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from wb_inn_extractor.gui import App
+from wb_inn_extractor.models import InspectResult, ResearchRow
 
 
 class _Var:
@@ -109,6 +110,55 @@ class GuiBatchTests(unittest.TestCase):
                 app._action_batch()
 
             load_known.assert_not_called()
+
+    def test_batch_stops_and_saves_partial_file_on_antibot(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = App.__new__(App)
+            app._require_sample_path = lambda: root / "research_sample.xlsx"
+            app._required_profile_dir = lambda: root / "profile"
+            app._append_log = lambda _message: None
+            app._set_batch_progress = lambda **_kwargs: None
+            app.row_var = _Var("2")
+            app.batch_count_var = _Var("1")
+            app.artifacts_dir_var = _Var(str(root / "artifacts"))
+            app.batch_output_var = _Var(str(root / "batch_results.xlsx"))
+            app.registry_path_var = _Var(str(root / "inn_registry.xlsx"))
+            app.seller_history_path_var = _Var(str(root / "seller_history.xlsx"))
+            app.sample_use_known_sellers_var = _Var(False)
+            app.merge_batch_input_var = _Var("")
+            app.root = _Root()
+
+            research_row = ResearchRow(
+                source_sheet="1",
+                source_row_index=2,
+                product_name="Product",
+                wb_nm_id=123,
+                seller_name_raw="Seller",
+                wb_candidate_url="https://www.wildberries.ru/catalog/123/detail.aspx",
+            )
+            blocked_result = InspectResult(
+                row_number=2,
+                url=research_row.wb_candidate_url,
+                parse_status="ANTI_BOT_PAGE",
+                anti_bot_detected=True,
+            )
+            inspector = MagicMock()
+            inspector.inspect_row.return_value = blocked_result
+            inspector_context = MagicMock()
+            inspector_context.__enter__.return_value = inspector
+
+            with (
+                patch("wb_inn_extractor.gui.read_research_rows_range", return_value=[research_row]),
+                patch("wb_inn_extractor.gui.BatchInspector", return_value=inspector_context),
+                patch("wb_inn_extractor.gui.save_batch_results") as save_results,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "контрольную карточку"):
+                    app._action_batch()
+
+            save_results.assert_called_once()
+            self.assertEqual(save_results.call_args.args[0], root / "batch_results.xlsx")
+            self.assertEqual(save_results.call_args.args[1][0]["parse_status"], "ANTI_BOT_PAGE")
 
 
 if __name__ == "__main__":

@@ -1859,6 +1859,8 @@ class App:
                         )
                         skipped_viewed_sellers += 1
                     output_rows.append(skipped_row)
+                    if len(output_rows) % 10 == 0:
+                        save_batch_results(batch_output, output_rows)
                     self._append_log(
                         f"Batch: строка {row_number} пропущена по известному seller | seller={research_row.seller_name_raw} | status={skipped_row['parse_status']} | inn={skipped_row['inn']}\n"
                     )
@@ -1920,6 +1922,21 @@ class App:
                     "wb_seller_name": result.seller_display_name,
                     "wb_seller_url": result.seller_url,
                 })
+                if result.parse_status == "ANTI_BOT_PAGE":
+                    save_batch_results(batch_output, output_rows)
+                    self._append_log(
+                        f"Batch остановлен на строке {row_number}: WB не загрузил контрольную карточку. "
+                        f"Частичный результат сохранён: {batch_output}\n"
+                    )
+                    raise RuntimeError(
+                        "Wildberries не пропустил контрольную карточку товара. "
+                        "Пакетный прогон остановлен, чтобы не обработать весь список пустыми страницами.\n\n"
+                        f"Строка: {row_number}\n"
+                        f"Частичный результат: {batch_output}\n"
+                        "Закрой браузер WB, подожди несколько минут и повтори проверку одной строки."
+                    )
+                if len(output_rows) % 10 == 0:
+                    save_batch_results(batch_output, output_rows)
                 self._append_log(f"Batch: строка {row_number} завершена, status={result.parse_status}, inn={result.inn}\n")
 
         save_batch_results(batch_output, output_rows)

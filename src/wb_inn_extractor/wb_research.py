@@ -1,16 +1,21 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import re
+import socket
+import subprocess
 import time
 from pathlib import Path
+from urllib.request import urlopen
 from urllib.parse import urljoin, urlparse
 
-from playwright.sync_api import BrowserContext, Locator, Page, Response, sync_playwright
+from playwright.sync_api import Browser, BrowserContext, Locator, Page, Response, sync_playwright
 
 from .models import InspectResult, ResearchRow
 
 PRODUCT_GOTO_TIMEOUT_MS = 12_000
+PRODUCT_READY_TIMEOUT_MS = 30_000
 SELLER_GOTO_TIMEOUT_MS = 12_000
 WAIT_FOR_LOAD_STATE_TIMEOUT_MS = 8_000
 MAX_BATCH_ROW_ATTEMPTS = 3
@@ -113,11 +118,40 @@ DEEP_SELLER_TOOLTIP_TRIGGER_SELECTORS = [
     '[class*="seller"] [class*="info"]',
     '[class*="seller"] [class*="tooltip"]',
     '[class*="seller"] [class*="icon"]',
+    '[class*="seller" i] button',
+    'button[class*="seller" i]',
+    '[class*="seller" i] [class*="info" i]',
+    '[class*="seller" i] [class*="icon" i]',
 ]
 
 
 class TransientWBError(RuntimeError):
     pass
+
+
+class _BrowserSession:
+    def __init__(
+        self,
+        context: BrowserContext,
+        browser: Browser | None = None,
+        process: subprocess.Popen | None = None,
+    ) -> None:
+        self.context = context
+        self.browser = browser
+        self.process = process
+
+    def close(self) -> None:
+        try:
+            self.context.close()
+        except Exception:
+            pass
+        if self.browser is not None:
+            try:
+                self.browser.close()
+            except Exception:
+                pass
+        if self.process is not None and self.process.poll() is None:
+            _terminate_process_tree(self.process.pid)
 
 
 def _extract_requisites_text_via_dom(page: Page, include_body_scan: bool = False) -> str | None:
@@ -184,6 +218,7 @@ class BatchInspector:
         self.headful = headful
         self.profile_dir = profile_dir
         self._playwright = None
+        self._browser_session: _BrowserSession | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
 
@@ -200,19 +235,22 @@ class BatchInspector:
             self._playwright = None
 
     def _close_context(self) -> None:
-        if self._context is not None:
-            try:
-                self._context.close()
-            except Exception:
-                pass
-            self._context = None
+        if self._browser_session is not None:
+            self._browser_session.close()
+            self._browser_session = None
+        self._context = None
         self._page = None
 
     def _restart_context(self) -> None:
         if self._playwright is None:
             raise RuntimeError('Playwright is not started')
         self._close_context()
-        self._context = _open_context(playwright=self._playwright, headful=self.headful, profile_dir=self.profile_dir)
+        self._browser_session = _open_browser_session(
+            playwright=self._playwright,
+            headful=self.headful,
+            profile_dir=self.profile_dir,
+        )
+        self._context = self._browser_session.context
         self._page = _fresh_batch_page(self._context)
 
     def _ensure_page(self) -> Page:
@@ -313,6 +351,103 @@ def _fresh_batch_page(context: BrowserContext) -> Page:
     return reusable_page
 
 
+def _wait_for_product_page_ready(page: Page, nm_id: int | None, timeout_ms: int) -> bool:
+    expected_nm_id = str(nm_id) if nm_id is not None else ""
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1_000
+
+    while time.monotonic() < deadline:
+        title = _safe_page_title(page) or ""
+        if expected_nm_id and expected_nm_id in title:
+            return True
+        try:
+            if page.locator('a[aria-label="Подробнее о продавце"]').count() > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            return False
+    return False
+
+
+def _wait_for_seller_page_ready(page: Page, seller_name: str | None, timeout_ms: int = 30_000) -> bool:
+    expected_name = _normalize_text(seller_name or "").casefold()
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1_000
+
+    while time.monotonic() < deadline:
+        title = _normalize_text(_safe_page_title(page) or "")
+        try:
+            body_text = page.evaluate("() => (document.body?.innerText || '').slice(0, 12000)") or ""
+        except Exception:
+            body_text = ""
+        combined = _normalize_text(f"{title}\n{body_text}")
+        if expected_name and expected_name in combined.casefold():
+            return True
+        if _contains_seller_signal(combined):
+            return True
+        try:
+            if page.locator('.seller-details__title, [class*="seller-details"]').count() > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            return False
+    return False
+
+
+def _save_blocked_product_result(
+    page: Page,
+    response: Response | None,
+    row_number: int,
+    research_row: ResearchRow,
+    screenshot_path: Path,
+    html_path: Path,
+    text_path: Path,
+    artifacts_dir: Path,
+    profile_dir: Path | None,
+    manual_wait_seconds: int,
+    seller_url: str | None = None,
+    note: str | None = None,
+) -> InspectResult:
+    try:
+        page.screenshot(path=str(screenshot_path), full_page=True)
+    except Exception:
+        screenshot_path = None
+    html = _safe_page_content(page)
+    text = _safe_page_text(page)
+    html_path.write_text(html, encoding="utf-8")
+    text_path.write_text(text, encoding="utf-8")
+
+    result = _build_result(
+        row_number=row_number,
+        url=research_row.wb_candidate_url or "",
+        page=page,
+        http_status=response.status if response else None,
+        html=html,
+        text=text,
+        captured_tooltip_text=None,
+        screenshot_path=screenshot_path,
+        html_path=html_path,
+        text_path=text_path,
+        used_persistent_profile=profile_dir is not None,
+        profile_dir=profile_dir,
+        manual_wait_seconds=manual_wait_seconds,
+        seller_url=seller_url,
+        navigated_to_seller_page=bool(seller_url),
+    )
+    result.anti_bot_detected = True
+    result.parse_status = "ANTI_BOT_PAGE"
+    result.note = note or (
+        "WB не загрузил карточку товара и оставил пустую оболочку сайта. "
+        "Пакетный прогон нужно остановить и повторить после восстановления доступа."
+    )
+    _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=result)
+    return result
+
+
 def _should_restart_context(exc: Exception) -> bool:
     message = str(exc).lower()
     restart_markers = [
@@ -362,21 +497,61 @@ def _inspect_product_row_on_page(
     previous_url = page.url
     response = page.goto(
         research_row.wb_candidate_url,
-        wait_until='domcontentloaded',
+        wait_until='commit',
         timeout=PRODUCT_GOTO_TIMEOUT_MS,
     )
-    _best_effort_wait(page)
+    product_ready = _wait_for_product_page_ready(
+        page=page,
+        nm_id=research_row.wb_nm_id,
+        timeout_ms=8_000 if response is not None and response.status == 498 else PRODUCT_READY_TIMEOUT_MS,
+    )
+    if not product_ready:
+        return _save_blocked_product_result(
+            page=page,
+            response=response,
+            row_number=row_number,
+            research_row=research_row,
+            screenshot_path=screenshot_path,
+            html_path=html_path,
+            text_path=text_path,
+            artifacts_dir=artifacts_dir,
+            profile_dir=profile_dir,
+            manual_wait_seconds=manual_wait_seconds,
+        )
+
+    _best_effort_wait(page, settle_rounds=1)
     _ensure_not_stuck_on_previous_seller_page(
         page=page,
         research_row=research_row,
         previous_url=previous_url,
     )
 
-    seller_url, seller_response = _go_to_seller_page(page)
+    seller_url, seller_response, seller_page_ready = _go_to_seller_page(
+        page,
+        expected_seller_name=research_row.seller_name_raw,
+    )
     if seller_response is not None:
         response = seller_response
     if seller_url is None and _is_supported_wb_seller_url(page.url):
         seller_url = page.url
+    if seller_url and not seller_page_ready:
+        return _save_blocked_product_result(
+            page=page,
+            response=response,
+            row_number=row_number,
+            research_row=research_row,
+            screenshot_path=screenshot_path,
+            html_path=html_path,
+            text_path=text_path,
+            artifacts_dir=artifacts_dir,
+            profile_dir=profile_dir,
+            manual_wait_seconds=manual_wait_seconds,
+            seller_url=seller_url,
+            note=(
+                "WB открыл адрес продавца, но не загрузил страницу с реквизитами. "
+                "Пакетный прогон остановлен, чтобы не сохранить пустые результаты."
+            ),
+        )
 
     captured_tooltip_text = _reveal_supplier_requisites(page)
     if manual_wait_seconds > 0:
@@ -465,8 +640,9 @@ def inspect_product_row(
     manual_wait_seconds: int = 0,
 ) -> InspectResult:
     with sync_playwright() as playwright:
-        context = _open_context(playwright=playwright, headful=headful, profile_dir=profile_dir)
+        session = _open_browser_session(playwright=playwright, headful=headful, profile_dir=profile_dir)
         try:
+            context = session.context
             page = _fresh_batch_page(context)
             return _inspect_product_row_on_page(
                 page=page,
@@ -478,7 +654,7 @@ def inspect_product_row(
                 fast_success_exit=False,
             )
         finally:
-            context.close()
+            session.close()
 
 
 def build_row_error_result(
@@ -501,41 +677,128 @@ def build_row_error_result(
     )
 
 
-def _open_context(playwright, headful: bool, profile_dir: Path | None) -> BrowserContext:
+def _open_browser_session(playwright, headful: bool, profile_dir: Path | None) -> _BrowserSession:
     launch_args = [
         "--disable-blink-features=AutomationControlled",
         "--start-maximized",
     ]
     if profile_dir is not None:
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        return playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
-            headless=False,
-            viewport={"width": 1600, "height": 1400},
-            args=launch_args,
-        )
+        return _open_system_chrome_session(playwright=playwright, profile_dir=profile_dir)
 
     browser = playwright.chromium.launch(
         headless=not headful,
         args=launch_args,
     )
-    return browser.new_context(viewport={"width": 1600, "height": 1400})
+    context = browser.new_context(viewport={"width": 1600, "height": 1400})
+    return _BrowserSession(context=context, browser=browser)
 
 
-def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
+def _open_system_chrome_session(playwright, profile_dir: Path) -> _BrowserSession:
+    chrome_path = _find_system_chrome()
+    if chrome_path is None:
+        raise RuntimeError("Не найден установленный Google Chrome. Он нужен для прохождения защиты WB.")
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    debug_port = _reserve_local_port()
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(
+        [
+            str(chrome_path),
+            f"--remote-debugging-port={debug_port}",
+            f"--user-data-dir={profile_dir.resolve()}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+            "about:blank",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creation_flags,
+    )
+
+    try:
+        _wait_for_chrome_debug_port(debug_port=debug_port, process=process)
+        browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+        if not browser.contexts:
+            raise RuntimeError("Chrome запущен, но профиль браузера недоступен")
+        return _BrowserSession(context=browser.contexts[0], browser=browser, process=process)
+    except Exception:
+        if process.poll() is None:
+            _terminate_process_tree(process.pid)
+        raise
+
+
+def _find_system_chrome() -> Path | None:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+    ]
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _reserve_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_chrome_debug_port(
+    debug_port: int,
+    process: subprocess.Popen,
+    timeout_seconds: float = 15.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    endpoint = f"http://127.0.0.1:{debug_port}/json/version"
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"Google Chrome завершился при запуске, код {process.returncode}")
+        try:
+            with urlopen(endpoint, timeout=1) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if payload.get("webSocketDebuggerUrl"):
+                return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.25)
+    raise RuntimeError(f"Не удалось подключиться к Google Chrome: {last_error}")
+
+
+def _terminate_process_tree(pid: int) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        pass
+
+
+def _go_to_seller_page(
+    page: Page,
+    expected_seller_name: str | None = None,
+) -> tuple[str | None, Response | None, bool]:
     if "/seller/" in page.url:
         raise TransientWBError(f'Page is still on seller URL before seller navigation: {page.url}')
 
     discovered_seller_url = _wait_for_seller_link_or_page(page, allow_slug=True)
     if discovered_seller_url is not None:
+        if _click_seller_link(page, discovered_seller_url):
+            ready = _wait_for_seller_page_ready(page, expected_seller_name)
+            return discovered_seller_url, None, ready
         try:
             response = page.goto(
                 discovered_seller_url,
-                wait_until="domcontentloaded",
+                wait_until="commit",
                 timeout=SELLER_GOTO_TIMEOUT_MS,
             )
-            _best_effort_wait(page, settle_rounds=2)
-            return discovered_seller_url, response
+            ready = _wait_for_seller_page_ready(page, expected_seller_name)
+            return discovered_seller_url, response, ready
         except Exception:
             pass
 
@@ -553,11 +816,11 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
                 if target_url is not None:
                     response = page.goto(
                         target_url,
-                        wait_until="domcontentloaded",
+                        wait_until="commit",
                         timeout=SELLER_GOTO_TIMEOUT_MS,
                     )
-                    _best_effort_wait(page, settle_rounds=2)
-                    return target_url, response
+                    ready = _wait_for_seller_page_ready(page, expected_seller_name)
+                    return target_url, response, ready
 
                 try:
                     before_url = page.url
@@ -582,8 +845,8 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
                         continue
 
                     if _is_valid_wb_seller_url(navigated_url) or (allow_slug and _is_supported_wb_seller_url(navigated_url)):
-                        _best_effort_wait(page, settle_rounds=2)
-                        return navigated_url, response
+                        ready = _wait_for_seller_page_ready(page, expected_seller_name)
+                        return navigated_url, response, ready
 
                     try:
                         page.go_back(wait_until="domcontentloaded", timeout=WAIT_FOR_LOAD_STATE_TIMEOUT_MS)
@@ -594,7 +857,36 @@ def _go_to_seller_page(page: Page) -> tuple[str | None, Response | None]:
                     continue
         except Exception:
             continue
-    return None, None
+    return None, None, False
+
+
+def _click_seller_link(page: Page, target_url: str) -> bool:
+    for selector in PRODUCT_SELLER_LINK_SELECTORS:
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+        except Exception:
+            continue
+        for index in range(min(count, 12)):
+            candidate = locator.nth(index)
+            try:
+                candidate_url = _normalize_candidate_seller_url(
+                    page.url,
+                    candidate.get_attribute("href"),
+                    allow_slug=_selector_allows_slug_seller_url(selector),
+                )
+                if candidate_url != target_url:
+                    continue
+                candidate.scroll_into_view_if_needed(timeout=2_000)
+                candidate.click(timeout=3_000, no_wait_after=True)
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    if _is_supported_wb_seller_url(page.url):
+                        return True
+                    page.wait_for_timeout(250)
+            except Exception:
+                continue
+    return False
 
 
 
@@ -714,7 +1006,7 @@ def _is_safe_seller_tooltip_click_target(locator: Locator) -> bool:
                 """
                 (node) => {
                   if (!node) return false;
-                  const safeFragments = ['seller-details', 'seller-info', 'catalog-page__seller-details', 'tip-info', 'tooltip', 'supplier'];
+                  const safeFragments = ['seller-details', 'seller-info', 'sellerinfo', 'sellerheader', 'catalog-page__seller-details', 'tip-info', 'tooltip', 'supplier'];
                   const dangerFragments = ['basket', 'cart', 'product-card', 'add-to-basket', 'favorites', 'postpone', 'orderwrap', 'buy'];
 
                   let current = node;
@@ -1390,7 +1682,12 @@ def _is_plausible_seller_display_name(value: str | None) -> bool:
 
 
 def _should_run_deep_recovery(result: InspectResult) -> bool:
-    return result.parse_status in {"SELLER_PAGE_OPENED", "PAGE_OPENED_NO_REQUISITES", "NEEDS_REVIEW"}
+    return result.parse_status in {
+        "SELLER_PAGE_OPENED",
+        "PAGE_OPENED_NO_REQUISITES",
+        "NEEDS_REVIEW",
+        "Нет реквизитов на странице",
+    }
 
 
 def _page_has_empty_results_state(page: Page) -> bool:
@@ -1430,22 +1727,25 @@ def _run_deep_requisites_recovery(
     http_status = initial_http_status
 
     if seller_url is None and not _is_supported_wb_seller_url(page.url):
-        discovered_seller_url, response = _go_to_seller_page(page)
+        discovered_seller_url, response, _ = _go_to_seller_page(
+            page,
+            expected_seller_name=research_row.seller_name_raw,
+        )
         if discovered_seller_url is not None:
             seller_url = discovered_seller_url
             http_status = response.status if response else http_status
     elif seller_url is None and _is_supported_wb_seller_url(page.url):
         seller_url = page.url
 
-    if seller_url:
+    if seller_url and page.url.rstrip("/") != seller_url.rstrip("/"):
         try:
             response = page.goto(
                 seller_url,
-                wait_until="domcontentloaded",
+                wait_until="commit",
                 timeout=SELLER_GOTO_TIMEOUT_MS,
             )
             http_status = response.status if response else http_status
-            _best_effort_wait(page, include_networkidle=True, settle_rounds=2)
+            _wait_for_seller_page_ready(page, research_row.seller_name_raw)
         except Exception:
             pass
 
@@ -1458,22 +1758,6 @@ def _run_deep_requisites_recovery(
 
     html = _safe_page_content(page)
     text = _safe_page_text(page)
-
-    if not _first_match(INN_RE, captured_tooltip_text or "") and not _first_match(INN_RE, html) and not _first_match(INN_RE, text):
-        try:
-            response = page.reload(wait_until="domcontentloaded", timeout=SELLER_GOTO_TIMEOUT_MS)
-            http_status = response.status if response else http_status
-            _best_effort_wait(page, include_networkidle=True, settle_rounds=2)
-            captured_tooltip_text = captured_tooltip_text or _reveal_supplier_requisites_with_strategy(
-                page=page,
-                max_rounds=DEEP_TOOLTIP_REVEAL_ROUNDS,
-                pause_ms=DEEP_TOOLTIP_PAUSE_MS,
-                deep_mode=True,
-            )
-            html = _safe_page_content(page)
-            text = _safe_page_text(page)
-        except Exception:
-            pass
 
     page.screenshot(path=str(screenshot_path), full_page=True)
     html_path.write_text(html, encoding='utf-8')
