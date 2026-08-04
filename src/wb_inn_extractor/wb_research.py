@@ -7,8 +7,9 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from urllib.request import urlopen
-from urllib.parse import urljoin, urlparse
+from urllib.error import HTTPError
+from urllib.parse import urlencode, urljoin, urlparse
+from urllib.request import Request, urlopen
 
 from playwright.sync_api import Browser, BrowserContext, Locator, Page, Response, sync_playwright
 
@@ -16,7 +17,9 @@ from .models import InspectResult, ResearchRow
 
 PRODUCT_GOTO_TIMEOUT_MS = 12_000
 PRODUCT_READY_TIMEOUT_MS = 30_000
-FAST_PAGE_READY_TIMEOUT_MS = 15_000
+FAST_PAGE_READY_TIMEOUT_MS = 8_000
+REQUISITES_APPEAR_TIMEOUT_MS = 1_500
+PUBLIC_API_TIMEOUT_SECONDS = 5
 SELLER_GOTO_TIMEOUT_MS = 12_000
 WAIT_FOR_LOAD_STATE_TIMEOUT_MS = 8_000
 MAX_BATCH_ROW_ATTEMPTS = 3
@@ -225,8 +228,6 @@ class BatchInspector:
 
     def __enter__(self) -> "BatchInspector":
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        self._playwright = sync_playwright().start()
-        self._restart_context()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -254,6 +255,12 @@ class BatchInspector:
         self._context = self._browser_session.context
         self._page = _fresh_batch_page(self._context)
 
+    def _ensure_browser_started(self) -> None:
+        if self._playwright is not None:
+            return
+        self._playwright = sync_playwright().start()
+        self._restart_context()
+
     def _ensure_page(self) -> Page:
         if self._context is None:
             raise RuntimeError('BatchInspector is not started')
@@ -262,8 +269,17 @@ class BatchInspector:
         return self._page
 
     def inspect_row(self, row_number: int, research_row: ResearchRow) -> InspectResult:
+        api_result = _inspect_product_via_public_api(
+            row_number=row_number,
+            research_row=research_row,
+            artifacts_dir=self.artifacts_dir,
+        )
+        if api_result is not None:
+            return api_result
+
+        self._ensure_browser_started()
         if self._context is None:
-            raise RuntimeError('BatchInspector is not started')
+            raise RuntimeError('BatchInspector browser is not started')
 
         last_error: Exception | None = None
         for attempt in range(MAX_BATCH_ROW_ATTEMPTS):
@@ -303,6 +319,146 @@ class BatchInspector:
         if last_error is not None:
             raise last_error
         raise RuntimeError('inspect_row failed without explicit error')
+
+
+def _inspect_product_via_public_api(
+    row_number: int,
+    research_row: ResearchRow,
+    artifacts_dir: Path,
+) -> InspectResult | None:
+    if research_row.wb_nm_id is None:
+        return None
+
+    card_query = urlencode(
+        {
+            "appType": 1,
+            "curr": "rub",
+            "dest": 1259570991,
+            "spp": 30,
+            "nm": research_row.wb_nm_id,
+        }
+    )
+    try:
+        card_payload = _load_public_wb_json(f"https://card.wb.ru/cards/v4/detail?{card_query}")
+    except Exception:
+        return None
+
+    products = card_payload.get("products") if isinstance(card_payload, dict) else None
+    if not isinstance(products, list):
+        return None
+    product = next(
+        (
+            item
+            for item in products
+            if isinstance(item, dict) and str(item.get("id")) == str(research_row.wb_nm_id)
+        ),
+        None,
+    )
+    if product is None:
+        return None
+
+    supplier_id = product.get("supplierId")
+    try:
+        supplier_id = int(supplier_id)
+    except (TypeError, ValueError):
+        return None
+
+    legal_url = f"https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{supplier_id}.json"
+    try:
+        legal_payload = _load_public_wb_json(legal_url)
+    except HTTPError as exc:
+        if exc.code != 404:
+            return None
+        legal_payload = {}
+    except Exception:
+        return None
+
+    if not isinstance(legal_payload, dict):
+        legal_payload = {}
+
+    inn = _normalize_identifier(legal_payload.get("inn"), {10, 12, 14})
+    registration_number = _normalize_identifier(legal_payload.get("ogrn"), {13, 15})
+    ogrn = registration_number if registration_number and len(registration_number) == 13 else None
+    ogrnip = registration_number if registration_number and len(registration_number) == 15 else None
+    legal_name = _first_non_empty(
+        _string_value(legal_payload.get("supplierName")),
+        _string_value(legal_payload.get("name")),
+        _string_value(legal_payload.get("tradeName")),
+    )
+    seller_name = _first_non_empty(
+        _string_value(product.get("supplier")),
+        research_row.seller_name_raw,
+    )
+    entity_type = _extract_entity_type(legal_name or "")
+    legal_text = json.dumps(legal_payload, ensure_ascii=False)
+    seller_country = _detect_seller_country(legal_text)
+    seller_url = f"https://www.wildberries.ru/seller/{supplier_id}"
+
+    if inn:
+        parse_status = "SUCCESS"
+        note = "ИНН получен из открытых данных Wildberries"
+    elif seller_country:
+        parse_status = seller_country
+        note = f"Обнаружен продавец из страны: {seller_country}"
+    elif entity_type or legal_payload:
+        parse_status = "NEEDS_REVIEW"
+        note = "WB вернул данные продавца, но ИНН отсутствует"
+    else:
+        parse_status = "Нет реквизитов на странице"
+        note = "WB не вернул реквизиты продавца"
+
+    result = InspectResult(
+        row_number=row_number,
+        url=research_row.wb_candidate_url or "",
+        final_url=seller_url,
+        http_status=200,
+        parse_status=parse_status,
+        anti_bot_detected=False,
+        used_persistent_profile=False,
+        seller_url=seller_url,
+        navigated_to_seller_page=False,
+        inn=inn,
+        ogrn=ogrn,
+        ogrnip=ogrnip,
+        entity_type=entity_type,
+        seller_display_name=seller_name,
+        note=note,
+    )
+    _write_result_json(artifacts_dir=artifacts_dir, row_number=row_number, result=result)
+    return result
+
+
+def _load_public_wb_json(url: str) -> dict:
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Referer": "https://www.wildberries.ru/",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    with urlopen(request, timeout=PUBLIC_API_TIMEOUT_SECONDS) as response:
+        payload = json.load(response)
+    if not isinstance(payload, dict):
+        raise ValueError("WB API returned a non-object payload")
+    return payload
+
+
+def _string_value(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = _normalize_text(str(value))
+    return normalized or None
+
+
+def _normalize_identifier(value: object, valid_lengths: set[int]) -> str | None:
+    if value is None:
+        return None
+    digits = re.sub(r"\D", "", str(value))
+    return digits if len(digits) in valid_lengths else None
 
 
 def _is_unexpected_page_url(url: str | None) -> bool:
@@ -354,12 +510,37 @@ def _fresh_batch_page(context: BrowserContext) -> Page:
 
 def _wait_for_product_page_ready(page: Page, nm_id: int | None, timeout_ms: int) -> bool:
     expected_nm_id = str(nm_id) if nm_id is not None else ""
+    expected_url_marker = f"/catalog/{expected_nm_id}/" if expected_nm_id else "/catalog/"
     deadline = time.monotonic() + max(timeout_ms, 0) / 1_000
 
     while time.monotonic() < deadline:
         title = _safe_page_title(page) or ""
         if expected_nm_id and expected_nm_id in title:
             return True
+        try:
+            product_content_loaded = bool(
+                page.evaluate(
+                    """
+                    ({ expectedId, expectedUrlMarker }) => {
+                      const text = document.body?.innerText || '';
+                      if (!location.pathname.includes(expectedUrlMarker) || text.length < 300) {
+                        return false;
+                      }
+                      return Boolean(
+                        (expectedId && text.includes(expectedId)) ||
+                        text.includes('Артикул') ||
+                        text.includes('Добавить в корзину') ||
+                        text.includes('Купить сейчас')
+                      );
+                    }
+                    """,
+                    {"expectedId": expected_nm_id, "expectedUrlMarker": expected_url_marker},
+                )
+            )
+            if product_content_loaded:
+                return True
+        except Exception:
+            pass
         try:
             if page.locator('a[aria-label="Подробнее о продавце"]').count() > 0:
                 return True
@@ -418,14 +599,21 @@ def _save_blocked_product_result(
         "WB не загрузил карточку товара и оставил пустую оболочку сайта."
     )
     if not save_diagnostics:
+        page_title = _safe_page_title(page)
+        try:
+            page_text = page.evaluate("() => (document.body?.innerText || '').slice(0, 12000)") or ""
+        except Exception:
+            page_text = ""
+        http_status = response.status if response else None
+        anti_bot_detected = _contains_anti_bot_text(f"{page_title or ''}\n{page_text}", http_status)
         result = InspectResult(
             row_number=row_number,
             url=research_row.wb_candidate_url or "",
-            page_title=_safe_page_title(page),
+            page_title=page_title,
             final_url=page.url,
-            http_status=response.status if response else None,
-            parse_status="ANTI_BOT_PAGE",
-            anti_bot_detected=True,
+            http_status=http_status,
+            parse_status="ANTI_BOT_PAGE" if anti_bot_detected else "PAGE_LOAD_TIMEOUT",
+            anti_bot_detected=anti_bot_detected,
             used_persistent_profile=profile_dir is not None,
             profile_dir=str(profile_dir) if profile_dir else None,
             manual_wait_seconds=manual_wait_seconds,
@@ -581,7 +769,7 @@ def _inspect_product_row_on_page(
             save_diagnostics=not fast_success_exit,
             note=(
                 "WB открыл адрес продавца, но не загрузил страницу с реквизитами. "
-                "Пакетный прогон остановлен, чтобы не сохранить пустые результаты."
+                "Строка сохранена без ИНН."
             ),
         )
 
@@ -953,7 +1141,9 @@ def _reveal_supplier_requisites_with_strategy(
         return captured_tooltip_text
 
     for _ in range(max_rounds):
-        _trigger_supplier_tooltip(page, deep_mode=deep_mode)
+        triggered_text = _trigger_supplier_tooltip(page, deep_mode=deep_mode)
+        if _contains_seller_signal(triggered_text or ""):
+            return triggered_text
         _best_effort_wait(page, include_networkidle=deep_mode, settle_rounds=1 if not deep_mode else 2)
 
         dom_text = _extract_requisites_text_via_dom(page, include_body_scan=deep_mode)
@@ -980,9 +1170,9 @@ def _reveal_supplier_requisites_with_strategy(
     return captured_tooltip_text
 
 
-def _trigger_supplier_tooltip(page: Page, deep_mode: bool = False) -> None:
+def _trigger_supplier_tooltip(page: Page, deep_mode: bool = False) -> str | None:
     if _page_has_empty_results_state(page):
-        return
+        return None
 
     selectors = list(SELLER_TOOLTIP_TRIGGER_SELECTORS)
     if deep_mode:
@@ -995,21 +1185,38 @@ def _trigger_supplier_tooltip(page: Page, deep_mode: bool = False) -> None:
         for locator in candidates:
             try:
                 locator.scroll_into_view_if_needed(timeout=375)
+                if selector in SAFE_CLICK_SELLER_TOOLTIP_TRIGGER_SELECTORS:
+                    if _safe_click_seller_tooltip_trigger(page, locator):
+                        requisites_text = _wait_for_requisites_text(page)
+                        if requisites_text:
+                            return requisites_text
+
                 _hover_like_human(page, locator)
                 try:
                     locator.focus(timeout=250)
                 except Exception:
                     pass
-                if selector in SAFE_CLICK_SELLER_TOOLTIP_TRIGGER_SELECTORS:
-                    _safe_click_seller_tooltip_trigger(page, locator)
-                    if _tooltip_visible(page) or _contains_seller_signal(_extract_requisites_text_via_dom(page, include_body_scan=False) or ""):
-                        return
                 _dispatch_tooltip_events(page, locator)
                 _force_tooltip_open_via_js(locator)
-                if _tooltip_visible(page) or _contains_seller_signal(_extract_requisites_text_via_dom(page, include_body_scan=False) or ""):
-                    return
+                requisites_text = _wait_for_requisites_text(page)
+                if requisites_text:
+                    return requisites_text
             except Exception:
                 continue
+    return None
+
+
+def _wait_for_requisites_text(page: Page, timeout_ms: int = REQUISITES_APPEAR_TIMEOUT_MS) -> str | None:
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1_000
+    while time.monotonic() < deadline:
+        requisites_text = _extract_requisites_text_via_dom(page, include_body_scan=False)
+        if _contains_seller_signal(requisites_text or ""):
+            return requisites_text
+        try:
+            page.wait_for_timeout(100)
+        except Exception:
+            break
+    return None
 
 
 def _safe_click_seller_tooltip_trigger(page: Page, locator: Locator) -> bool:
@@ -1146,6 +1353,13 @@ def _tooltip_visible(page: Page) -> bool:
 def _page_has_requisites_entrypoints(page: Page, deep_mode: bool) -> bool:
     if _page_has_empty_results_state(page):
         return False
+
+    for selector in SAFE_CLICK_SELLER_TOOLTIP_TRIGGER_SELECTORS:
+        try:
+            if page.locator(selector).count() > 0:
+                return True
+        except Exception:
+            continue
 
     selectors = list(SELLER_TOOLTIP_TRIGGER_SELECTORS)
     if deep_mode:
