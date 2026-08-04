@@ -81,6 +81,10 @@ class App:
         self.excel_merge_output_zip_var = tk.StringVar(value=str(Path("output/merged_tabs.zip")))
         self.excel_merge_create_zip_var = tk.BooleanVar(value=True)
         self.excel_merge_summary_var = tk.StringVar(value="Объединение Excel ещё не запускалось")
+        self.sample_use_known_sellers_var = tk.BooleanVar(value=True)
+        self.sample_filter_summary_var = tk.StringVar(
+            value="Фильтры повторов: включены, подробности появятся после создания sample"
+        )
         self.headful_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Готово")
         self.sheet_mode_var = tk.StringVar(value="all")
@@ -449,20 +453,27 @@ class App:
         ttk.Label(frame, text="Лимит строк для sample", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=self.limit_var, width=12).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=4)
 
+        ttk.Checkbutton(
+            frame,
+            text="Исключать sellers из реестра/истории",
+            variable=self.sample_use_known_sellers_var,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
         ttk.Button(
             frame,
             text="Создать research sample",
             command=lambda: self._run_in_thread(self._action_sample, task_name="Создание sample"),
             style="Primary.TButton",
-        ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 8))
+        ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 8))
         ttk.Label(
             frame,
-            text="Создаёт общий sample по выбранным листам, убирает дубли по имени seller и может сразу исключать продавцов из реестра/истории.",
+            text="Создаёт общий sample по выбранным листам, убирает дубли по имени seller. Фильтры можно отключить для чистого перезапуска категории.",
             style="Muted.TLabel",
             wraplength=380,
             justify="left",
-        ).grid(row=3, column=0, columnspan=3, sticky="w")
-        ttk.Label(frame, textvariable=self.sample_summary_var, style="Body.TLabel", justify="left", wraplength=420).grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, textvariable=self.sample_summary_var, style="Body.TLabel", justify="left", wraplength=520).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.sample_filter_summary_var, style="Muted.TLabel", justify="left", wraplength=520).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
         return frame
 
     def _build_wb_block(self, parent):
@@ -836,6 +847,7 @@ class App:
         self.headful_var.trace_add("write", lambda *_: self._save_settings())
         self.excel_merge_create_zip_var.trace_add("write", lambda *_: self._save_settings())
         self.conference_autosearch_only_p1_var.trace_add("write", lambda *_: self._save_settings())
+        self.sample_use_known_sellers_var.trace_add("write", lambda *_: self._save_settings())
 
 
     def _open_registry_path(self) -> None:
@@ -941,6 +953,8 @@ class App:
             self.excel_merge_create_zip_var.set(bool(settings["excel_merge_create_zip"]))
         if "conference_autosearch_only_p1" in settings:
             self.conference_autosearch_only_p1_var.set(bool(settings["conference_autosearch_only_p1"]))
+        if "sample_use_known_sellers" in settings:
+            self.sample_use_known_sellers_var.set(bool(settings["sample_use_known_sellers"]))
         loaded = settings.get("selected_sheets")
         if isinstance(loaded, list):
             self._settings_loaded_selected_sheets = [str(x) for x in loaded]
@@ -950,6 +964,9 @@ class App:
         sample_summary = settings.get("sample_summary")
         if isinstance(sample_summary, str) and sample_summary:
             self.sample_summary_var.set(sample_summary)
+        sample_filter_summary = settings.get("sample_filter_summary")
+        if isinstance(sample_filter_summary, str) and sample_filter_summary:
+            self.sample_filter_summary_var.set(sample_filter_summary)
         registry_summary = settings.get("registry_summary")
         if isinstance(registry_summary, str) and registry_summary:
             self._set_registry_summary(registry_summary)
@@ -979,6 +996,7 @@ class App:
                 "conference_autosearch_delay": self.conference_autosearch_delay_var.get().strip(),
                 "conference_autosearch_only_p1": bool(self.conference_autosearch_only_p1_var.get()),
                 "conference_summary": self.conference_summary_var.get(),
+                "sample_use_known_sellers": bool(self.sample_use_known_sellers_var.get()),
                 "adbeam_input_path": self.adbeam_input_path_var.get().strip(),
                 "adbeam_output_path": self.adbeam_output_path_var.get().strip(),
                 "adbeam_summary": self.adbeam_summary_var.get(),
@@ -1008,6 +1026,7 @@ class App:
                 "selected_sheets": self._get_selected_sheet_names_from_ui() if hasattr(self, "sheet_listbox") else [],
                 "selection_summary": self.selection_summary_var.get(),
                 "sample_summary": self.sample_summary_var.get(),
+                "sample_filter_summary": self.sample_filter_summary_var.get(),
                 "headful": bool(self.headful_var.get()),
             }
             SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1601,45 +1620,58 @@ class App:
         raw_limit = self.limit_var.get().strip()
         limit = self._parse_positive_int(raw_limit, field_name="Лимит строк") if raw_limit else None
         selected_sheets = self._resolve_selected_sheets_for_sample()
-        excluded_seller_keys = None
         registry_path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
         seller_history_path = Path(self.seller_history_path_var.get().strip() or "output/seller_history.xlsx")
-        known_seller_sources = load_known_seller_sources(
-            registry_path=registry_path if registry_path.exists() else None,
-            seller_history_path=seller_history_path if seller_history_path.exists() else None,
-        )
-        if known_seller_sources:
-            excluded_seller_keys = set(known_seller_sources)
+        use_known_sellers = bool(self.sample_use_known_sellers_var.get())
+        registry_exists = registry_path.exists()
+        seller_history_exists = seller_history_path.exists()
+
+        known_seller_sources = {}
+        if use_known_sellers:
+            known_seller_sources = load_known_seller_sources(
+                registry_path=registry_path if registry_exists else None,
+                seller_history_path=seller_history_path if seller_history_exists else None,
+            )
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        rows = extract_research_rows(
+        unfiltered_rows = extract_research_rows(
             input_path,
-            limit=limit,
             selected_sheets=selected_sheets,
-            excluded_seller_keys=excluded_seller_keys,
         )
+        filtered_rows = [
+            row
+            for row in unfiltered_rows
+            if not known_seller_sources or (row.seller_name_raw or "").strip().casefold() not in known_seller_sources
+        ]
+        rows = filtered_rows[:limit] if limit is not None else filtered_rows
         if not rows:
             raise ValueError("Не удалось собрать ни одной строки для research sample")
 
         save_research_sample(output_path, rows)
         rows_by_sheet = summarize_research_rows_by_sheet(rows)
+        excluded_by_filters = len(unfiltered_rows) - len(filtered_rows)
+        registry_resolved = self._format_path_status(registry_path)
+        seller_history_resolved = self._format_path_status(seller_history_path)
 
         sheet_scope_label = self._build_sheet_scope_label(selected_sheets)
         self._append_log(f"Создан файл: {output_path}\n")
         self._append_log(f"Листы для sample: {sheet_scope_label}\n")
-        if registry_path.exists():
+        self._append_log(f"Sample: рабочая папка приложения: {Path.cwd()}\n")
+        self._append_log(f"Sample: реестр ИНН: {registry_resolved}\n")
+        self._append_log(f"Sample: история sellers: {seller_history_resolved}\n")
+        if not use_known_sellers:
+            self._append_log("Sample: фильтр по реестру/истории отключён\n")
+        elif known_seller_sources:
             self._append_log(
-                f"Sample: подключен реестр ИНН {registry_path}\n"
+                f"Sample: ключей продавцов для пропуска: {len(known_seller_sources)} | исключено из текущей выборки: {excluded_by_filters}\n"
             )
-        if seller_history_path.exists():
-            self._append_log(
-                f"Sample: подключена история sellers {seller_history_path}\n"
-            )
-        if excluded_seller_keys is not None:
-            self._append_log(
-                f"Из sample исключены продавцы из известных источников | ключей для пропуска: {len(excluded_seller_keys)}\n"
-            )
+        else:
+            self._append_log("Sample: фильтр включён, но ключей для пропуска не найдено\n")
         if limit is None:
             self._append_log("Лимит строк не задан: в sample сохранены все уникальные продавцы по имени seller\n")
+        else:
+            self._append_log(f"Лимит строк задан: {limit}\n")
+        self._append_log(f"Строк без фильтра реестра/истории: {len(unfiltered_rows)}\n")
+        self._append_log(f"Строк после фильтра реестра/истории: {len(filtered_rows)}\n")
         self._append_log(f"Строк (уникальных по seller): {len(rows)}\n")
         self._append_log("Распределение строк по листам в sample:\n")
         for sheet_name, count in rows_by_sheet.items():
@@ -1648,13 +1680,31 @@ class App:
         self.root.after(0, lambda: self.row_var.set("2"))
         sample_summary = (
             f"Последний sample: {len(rows)} строк\n"
-            f"Листов в sample: {len(rows_by_sheet)}\n"
-            f"Рекомендуемая стартовая строка для batch: 2"
+            f"Без фильтра: {len(unfiltered_rows)} | после фильтра: {len(filtered_rows)} | исключено: {excluded_by_filters}\n"
+            f"Листов в sample: {len(rows_by_sheet)}"
         )
+        if limit is not None:
+            sample_summary += f"\nЛимит: {limit}"
+        sample_summary += "\nРекомендуемая стартовая строка для batch: 2"
+        filter_summary = (
+            f"Фильтры повторов: {'включены' if use_known_sellers else 'отключены'} | "
+            f"ключей: {len(known_seller_sources)} | cwd: {Path.cwd()}\n"
+            f"Реестр: {registry_resolved}\n"
+            f"История: {seller_history_resolved}"
+        )
+        if use_known_sellers and len(unfiltered_rows) > 0 and len(filtered_rows) < len(unfiltered_rows) * 0.25:
+            filter_summary += "\nВнимание: фильтры отсекли больше 75% выборки."
         self.root.after(0, lambda sample_summary=sample_summary: self.sample_summary_var.set(sample_summary))
+        self.root.after(0, lambda filter_summary=filter_summary: self.sample_filter_summary_var.set(filter_summary))
         self.root.after(0, lambda: self.selection_summary_var.set(
-            f"Последний sample: {len(rows)} строк | листов в sample: {len(rows_by_sheet)} | стартовая строка = 2"
+            f"Последний sample: {len(rows)} строк | без фильтра: {len(unfiltered_rows)} | исключено: {excluded_by_filters} | стартовая строка = 2"
         ))
+
+    @staticmethod
+    def _format_path_status(path: Path) -> str:
+        resolved = path.resolve() if path.exists() else path.absolute()
+        status = "есть" if path.exists() else "нет"
+        return f"{resolved} ({status})"
 
     def _action_inspect(self) -> None:
         sample_path = self._require_sample_path()
@@ -1702,20 +1752,23 @@ class App:
         profile_dir.mkdir(parents=True, exist_ok=True)
         batch_output.parent.mkdir(parents=True, exist_ok=True)
 
-        known_seller_sources = load_known_seller_sources(
-            registry_path=registry_path if registry_path.exists() else None,
-            seller_history_path=seller_history_path if seller_history_path.exists() else None,
-        )
+        known_seller_sources = {}
+        if use_known_sellers:
+            known_seller_sources = load_known_seller_sources(
+                registry_path=registry_path if registry_path.exists() else None,
+                seller_history_path=seller_history_path if seller_history_path.exists() else None,
+            )
 
         research_rows = read_research_rows_range(sample_path, start_row=start_row, limit=batch_count)
         total = len(research_rows)
         self._append_log(f"Batch: старт диапазона строк {start_row}-{start_row + max(total - 1, 0)} | sample={sample_path}\n")
-        if registry_path.exists():
-            self._append_log(f"Batch: подключен реестр ИНН {registry_path}\n")
-        if seller_history_path.exists():
-            self._append_log(f"Batch: подключена история sellers {seller_history_path}\n")
-        if known_seller_sources:
-            self._append_log(f"Batch: всего ключей продавцов для пропуска: {len(known_seller_sources)}\n")
+        self._append_log(f"Batch: рабочая папка приложения: {Path.cwd()}\n")
+        self._append_log(f"Batch: реестр ИНН: {self._format_path_status(registry_path)}\n")
+        self._append_log(f"Batch: история sellers: {self._format_path_status(seller_history_path)}\n")
+        if use_known_sellers:
+            self._append_log(f"Batch: фильтр по реестру/истории включён | ключей для пропуска: {len(known_seller_sources)}\n")
+        else:
+            self._append_log("Batch: фильтр по реестру/истории отключён\n")
         output_rows = []
         skipped_known_sellers = 0
         skipped_viewed_sellers = 0
