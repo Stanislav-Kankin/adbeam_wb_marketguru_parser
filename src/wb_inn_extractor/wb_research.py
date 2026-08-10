@@ -8,7 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from playwright.sync_api import Browser, BrowserContext, Locator, Page, Response, sync_playwright
@@ -19,7 +19,7 @@ PRODUCT_GOTO_TIMEOUT_MS = 12_000
 PRODUCT_READY_TIMEOUT_MS = 30_000
 FAST_PAGE_READY_TIMEOUT_MS = 8_000
 REQUISITES_APPEAR_TIMEOUT_MS = 1_500
-PUBLIC_API_TIMEOUT_SECONDS = 5
+PUBLIC_API_TIMEOUT_SECONDS = 2
 SELLER_GOTO_TIMEOUT_MS = 12_000
 WAIT_FOR_LOAD_STATE_TIMEOUT_MS = 8_000
 MAX_BATCH_ROW_ATTEMPTS = 3
@@ -229,6 +229,7 @@ class BatchInspector:
         self._browser_session: _BrowserSession | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self._public_api_available: bool | None = None
 
     def __enter__(self) -> "BatchInspector":
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -286,17 +287,30 @@ class BatchInspector:
         return self._page
 
     def inspect_row(self, row_number: int, research_row: ResearchRow) -> InspectResult:
-        api_result = _inspect_product_via_public_api(
-            row_number=row_number,
-            research_row=research_row,
-            artifacts_dir=self.artifacts_dir,
-        )
-        if api_result is not None:
-            return api_result
+        if self._public_api_available is not False:
+            api_result = _inspect_product_via_public_api(
+                row_number=row_number,
+                research_row=research_row,
+                artifacts_dir=self.artifacts_dir,
+            )
+            self._public_api_available = api_result is not None
+            if api_result is not None:
+                return api_result
 
         self._ensure_browser_started()
         if self._context is None:
             raise RuntimeError('BatchInspector browser is not started')
+
+        page = self._ensure_page()
+        browser_api_result = _inspect_product_via_browser_network_api(
+            page=page,
+            row_number=row_number,
+            research_row=research_row,
+            artifacts_dir=self.artifacts_dir,
+            used_persistent_profile=self.profile_dir is not None,
+        )
+        if browser_api_result is not None:
+            return browser_api_result
 
         last_error: Exception | None = None
         for attempt in range(MAX_BATCH_ROW_ATTEMPTS):
@@ -360,17 +374,7 @@ def _inspect_product_via_public_api(
     except Exception:
         return None
 
-    products = card_payload.get("products") if isinstance(card_payload, dict) else None
-    if not isinstance(products, list):
-        return None
-    product = next(
-        (
-            item
-            for item in products
-            if isinstance(item, dict) and str(item.get("id")) == str(research_row.wb_nm_id)
-        ),
-        None,
-    )
+    product = _find_product_in_card_payload(card_payload, research_row.wb_nm_id)
     if product is None:
         return None
 
@@ -390,14 +394,125 @@ def _inspect_product_via_public_api(
     except Exception:
         return None
 
+    return _build_api_inspect_result(
+        row_number=row_number,
+        research_row=research_row,
+        product=product,
+        legal_payload=legal_payload if isinstance(legal_payload, dict) else {},
+        artifacts_dir=artifacts_dir,
+        used_persistent_profile=False,
+    )
+
+
+def _inspect_product_via_browser_network_api(
+    page: Page,
+    row_number: int,
+    research_row: ResearchRow,
+    artifacts_dir: Path,
+    used_persistent_profile: bool,
+) -> InspectResult | None:
+    nm_id = research_row.wb_nm_id
+    if nm_id is None:
+        return None
+
+    product_url = research_row.wb_candidate_url or f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx"
+    try:
+        with page.expect_response(
+            lambda response: _is_internal_card_response(response.url, nm_id),
+            timeout=PRODUCT_READY_TIMEOUT_MS,
+        ) as response_info:
+            page.goto(product_url, wait_until="domcontentloaded", timeout=PRODUCT_GOTO_TIMEOUT_MS)
+        card_response = response_info.value
+        if card_response.status != 200:
+            return None
+        card_payload = card_response.json()
+    except Exception:
+        return None
+
+    product = _find_product_in_card_payload(card_payload, nm_id)
+    if product is None:
+        return None
+
+    try:
+        supplier_id = int(product.get("supplierId"))
+    except (TypeError, ValueError):
+        return None
+
+    legal_url = f"https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{supplier_id}.json"
+    try:
+        legal_response = page.evaluate(
+            """
+            async (url) => {
+              const response = await fetch(url);
+              return {status: response.status, text: await response.text()};
+            }
+            """,
+            legal_url,
+        )
+        status = int(legal_response.get("status"))
+        if status == 404:
+            legal_payload = {}
+        elif status == 200:
+            legal_payload = json.loads(legal_response.get("text") or "{}")
+        else:
+            return None
+    except Exception:
+        return None
+
     if not isinstance(legal_payload, dict):
         legal_payload = {}
+    return _build_api_inspect_result(
+        row_number=row_number,
+        research_row=research_row,
+        product=product,
+        legal_payload=legal_payload,
+        artifacts_dir=artifacts_dir,
+        used_persistent_profile=used_persistent_profile,
+    )
+
+
+def _is_internal_card_response(url: str, nm_id: int) -> bool:
+    parsed = urlparse(url)
+    if parsed.netloc.lower() != "www.wildberries.ru" or "/__internal/u-card/cards/" not in parsed.path:
+        return False
+    return str(nm_id) in parse_qs(parsed.query).get("nm", [])
+
+
+def _find_product_in_card_payload(card_payload: object, nm_id: int) -> dict | None:
+    if not isinstance(card_payload, dict):
+        return None
+    products = card_payload.get("products")
+    if not isinstance(products, list):
+        data = card_payload.get("data")
+        products = data.get("products") if isinstance(data, dict) else None
+    if not isinstance(products, list):
+        return None
+    return next(
+        (
+            item
+            for item in products
+            if isinstance(item, dict) and str(item.get("id")) == str(nm_id)
+        ),
+        None,
+    )
+
+
+def _build_api_inspect_result(
+    row_number: int,
+    research_row: ResearchRow,
+    product: dict,
+    legal_payload: dict,
+    artifacts_dir: Path,
+    used_persistent_profile: bool,
+) -> InspectResult:
+    supplier_id = int(product["supplierId"])
 
     inn = _normalize_identifier(legal_payload.get("inn"), {10, 12, 14})
     registration_number = _normalize_identifier(legal_payload.get("ogrn"), {13, 15})
     ogrn = registration_number if registration_number and len(registration_number) == 13 else None
     ogrnip = registration_number if registration_number and len(registration_number) == 15 else None
     legal_name = _first_non_empty(
+        _string_value(legal_payload.get("supplierFullName")),
         _string_value(legal_payload.get("supplierName")),
         _string_value(legal_payload.get("name")),
         _string_value(legal_payload.get("tradeName")),
@@ -431,7 +546,7 @@ def _inspect_product_via_public_api(
         http_status=200,
         parse_status=parse_status,
         anti_bot_detected=False,
-        used_persistent_profile=False,
+        used_persistent_profile=used_persistent_profile,
         seller_url=seller_url,
         navigated_to_seller_page=False,
         inn=inn,
