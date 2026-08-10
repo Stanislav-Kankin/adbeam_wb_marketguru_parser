@@ -7,6 +7,7 @@ from wb_inn_extractor.models import InspectResult, ResearchRow
 from wb_inn_extractor.wb_research import (
     BrowserStartupError,
     BatchInspector,
+    _inspect_product_via_browser_network_api,
     _inspect_product_via_public_api,
     _page_has_requisites_entrypoints,
     _trigger_supplier_tooltip,
@@ -95,6 +96,37 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIs(result, api_result)
         playwright.assert_not_called()
+
+    def test_browser_network_api_builds_success_result(self):
+        card = {"products": [{"id": 267843270, "supplierId": 159267, "supplier": "ONEENERGY"}]}
+        legal = {
+            "supplierFullName": 'Общество с ограниченной ответственностью "ВАНЭНЕРДЖИ"',
+            "inn": "7725305764",
+            "ogrn": "1167746134324",
+        }
+        response = MagicMock(status=200)
+        response.json.return_value = card
+        response_info = MagicMock()
+        response_info.value = response
+        response_context = MagicMock()
+        response_context.__enter__.return_value = response_info
+        page = MagicMock()
+        page.expect_response.return_value = response_context
+        page.evaluate.return_value = {"status": 200, "text": __import__("json").dumps(legal)}
+
+        with TemporaryDirectory() as temp_dir:
+            result = _inspect_product_via_browser_network_api(
+                page=page,
+                row_number=6,
+                research_row=self.row,
+                artifacts_dir=Path(temp_dir),
+                used_persistent_profile=True,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.parse_status, "SUCCESS")
+        self.assertEqual(result.inn, "7725305764")
+        self.assertTrue(result.used_persistent_profile)
 
     def test_failed_browser_start_resets_inspector_state(self):
         with (
