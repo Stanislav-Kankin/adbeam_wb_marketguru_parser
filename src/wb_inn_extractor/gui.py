@@ -50,50 +50,13 @@ from .wb_research import BatchInspector, build_row_error_result, inspect_product
 
 SETTINGS_PATH = Path(".wb_inn_gui_settings.json")
 
-THEMES = {
-    "light": {
-        "bg": "#f3f7f9",
-        "sidebar": "#ffffff",
-        "surface": "#ffffff",
-        "surface_alt": "#f7fafb",
-        "border": "#d7e2e7",
-        "text": "#17232d",
-        "muted": "#667985",
-        "primary": "#2878d0",
-        "primary_hover": "#1f65b4",
-        "primary_soft": "#e9f3fc",
-        "success": "#20a36b",
-        "warning": "#cf8a22",
-        "danger": "#d95656",
-        "selection": "#dceefd",
-        "log_bg": "#f8fafb",
-    },
-    "dark": {
-        "bg": "#11171c",
-        "sidebar": "#151d23",
-        "surface": "#182127",
-        "surface_alt": "#202a31",
-        "border": "#30404a",
-        "text": "#edf3f6",
-        "muted": "#9aabb5",
-        "primary": "#58a6e7",
-        "primary_hover": "#72b7ef",
-        "primary_soft": "#20394c",
-        "success": "#45c990",
-        "warning": "#e3a84b",
-        "danger": "#f06a6a",
-        "selection": "#24445a",
-        "log_bg": "#10171c",
-    },
-}
-
 
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("AdBeam Outreach")
-        self.root.geometry("1480x940")
-        self.root.minsize(1180, 760)
+        self.root.title("WB INN Extractor — Research MVP")
+        self.root.geometry("1440x980")
+        self.root.minsize(1240, 820)
 
         self.input_path_var = tk.StringVar()
         self.sample_output_var = tk.StringVar(value=str(Path("output/research_sample.xlsx")))
@@ -145,9 +108,6 @@ class App:
         self.progress_detail_var = tk.StringVar(value="Прогресс появится во время пакетного прогона")
         self.progress_percent_var = tk.StringVar(value="0%")
         self.progress_value_var = tk.DoubleVar(value=0.0)
-        self.theme_var = tk.StringVar(value="light")
-        self.page_title_var = tk.StringVar(value="Извлечение ИНН")
-        self.page_subtitle_var = tk.StringVar(value="MarketGuru, Wildberries и подготовка данных для Контур")
 
         self._last_analyze_summary: AnalyzeSummary | None = None
         self._task_started_at: float | None = None
@@ -156,17 +116,9 @@ class App:
         self._settings_loaded_selected_sheets: list[str] = []
         self._registry_batch_files: list[str] = []
         self._settings_load_error: str | None = None
-        self._active_page = "extract"
-        self._nav_buttons: dict[str, ttk.Button] = {}
-        self._pages: dict[str, ttk.Frame] = {}
-        self._pipeline_labels: list[tuple[ttk.Label, ttk.Label]] = []
-        self._log_visible = True
 
-        self._load_settings()
-        loaded_theme = self._loaded_settings.get("theme") if hasattr(self, "_loaded_settings") else None
-        if loaded_theme in THEMES:
-            self.theme_var.set(loaded_theme)
         self._configure_theme()
+        self._load_settings()
         self._build_ui()
         self._show_settings_load_error()
         self._bind_settings_save()
@@ -180,216 +132,99 @@ class App:
         except tk.TclError:
             pass
 
-        colors = THEMES[self.theme_var.get()]
-        self._colors = colors
-        self.root.configure(background=colors["bg"])
+        bg = "#f4f7fb"
+        card = "#ffffff"
+        border = "#dbe4f0"
+        muted = "#5f6f86"
+        text = "#1f2a37"
+        primary = "#2f6fed"
+        self.root.configure(background=bg)
 
-        style.configure(".", background=colors["surface"], foreground=colors["text"], font=("Segoe UI", 10))
-        style.configure("App.TFrame", background=colors["bg"])
-        style.configure("Sidebar.TFrame", background=colors["sidebar"])
-        style.configure("Topbar.TFrame", background=colors["surface"])
-        style.configure("Card.TFrame", background=colors["surface"], relief="solid", borderwidth=1)
-        style.configure(
-            "Card.TLabelframe",
-            background=colors["surface"],
-            bordercolor=colors["border"],
-            lightcolor=colors["border"],
-            darkcolor=colors["border"],
-            relief="solid",
-            borderwidth=1,
-        )
-        style.configure(
-            "Card.TLabelframe.Label",
-            background=colors["surface"],
-            foreground=colors["text"],
-            font=("Segoe UI Semibold", 10),
-        )
-        style.configure(
-            "Brand.TLabel",
-            background=colors["sidebar"],
-            foreground=colors["text"],
-            font=("Segoe UI Semibold", 15),
-        )
-        style.configure(
-            "BrandMeta.TLabel",
-            background=colors["sidebar"],
-            foreground=colors["muted"],
-            font=("Segoe UI", 9),
-        )
-        style.configure(
-            "PageTitle.TLabel",
-            background=colors["surface"],
-            foreground=colors["text"],
-            font=("Segoe UI Semibold", 16),
-        )
-        style.configure(
-            "PageSubtitle.TLabel",
-            background=colors["surface"],
-            foreground=colors["muted"],
-            font=("Segoe UI", 9),
-        )
-        style.configure("SectionTitle.TLabel", background=colors["bg"], foreground=colors["text"], font=("Segoe UI Semibold", 15))
-        style.configure("Muted.TLabel", background=colors["surface"], foreground=colors["muted"], font=("Segoe UI", 9))
-        style.configure("Body.TLabel", background=colors["surface"], foreground=colors["text"])
-        style.configure("HeaderValue.TLabel", background=colors["surface"], foreground=colors["muted"])
-        style.configure("PipelineTitle.TLabel", background=colors["surface"], foreground=colors["text"], font=("Segoe UI Semibold", 10))
-        style.configure("PipelineMeta.TLabel", background=colors["surface"], foreground=colors["muted"], font=("Segoe UI", 8))
-        style.configure("PipelineActive.TLabel", background=colors["primary_soft"], foreground=colors["primary"], font=("Segoe UI Semibold", 10), padding=(8, 5))
-        style.configure("PipelineDone.TLabel", background=colors["surface"], foreground=colors["success"], font=("Segoe UI Semibold", 10), padding=(8, 5))
-        style.configure("PipelineIdle.TLabel", background=colors["surface_alt"], foreground=colors["muted"], font=("Segoe UI Semibold", 10), padding=(8, 5))
-
-        style.configure("Primary.TButton", padding=(14, 8), foreground="#ffffff", background=colors["primary"], bordercolor=colors["primary"])
-        style.map("Primary.TButton", background=[("active", colors["primary_hover"]), ("pressed", colors["primary_hover"])])
-        style.configure("Secondary.TButton", padding=(11, 8), foreground=colors["text"], background=colors["surface_alt"], bordercolor=colors["border"])
-        style.map("Secondary.TButton", background=[("active", colors["selection"]), ("pressed", colors["selection"])])
-        style.configure("Flat.TButton", padding=(9, 7), foreground=colors["muted"], background=colors["surface"], borderwidth=0)
-        style.map("Flat.TButton", foreground=[("active", colors["primary"])], background=[("active", colors["primary_soft"])])
-        style.configure("Nav.TButton", anchor="w", padding=(20, 11), foreground=colors["muted"], background=colors["sidebar"], borderwidth=0)
-        style.map("Nav.TButton", foreground=[("active", colors["text"])], background=[("active", colors["surface_alt"])])
-        style.configure("NavActive.TButton", anchor="w", padding=(20, 11), foreground=colors["primary"], background=colors["primary_soft"], borderwidth=0)
-        style.map("NavActive.TButton", background=[("active", colors["primary_soft"])])
-        style.configure("Theme.TButton", anchor="w", padding=(16, 9), foreground=colors["muted"], background=colors["sidebar"], bordercolor=colors["border"])
-        style.map("Theme.TButton", background=[("active", colors["surface_alt"])], foreground=[("active", colors["text"])])
-        style.configure("TEntry", fieldbackground=colors["surface_alt"], foreground=colors["text"], insertcolor=colors["text"], bordercolor=colors["border"], padding=6)
-        style.map("TEntry", bordercolor=[("focus", colors["primary"])])
-        style.configure("TCheckbutton", background=colors["surface"], foreground=colors["text"])
-        style.map("TCheckbutton", background=[("active", colors["surface"])])
-        style.configure("TRadiobutton", background=colors["surface"], foreground=colors["text"])
-        style.map("TRadiobutton", background=[("active", colors["surface"])])
-        style.configure("TProgressbar", troughcolor=colors["surface_alt"], background=colors["primary"], bordercolor=colors["border"], lightcolor=colors["primary"], darkcolor=colors["primary"])
-        style.configure("TScrollbar", background=colors["surface_alt"], troughcolor=colors["surface"], bordercolor=colors["border"], arrowcolor=colors["muted"])
-        style.configure("TFrame", background=colors["surface"])
+        style.configure(".", background=bg, foreground=text, font=("Segoe UI", 10))
+        style.configure("Card.TLabelframe", background=card, bordercolor=border, relief="solid")
+        style.configure("Card.TLabelframe.Label", background=bg, foreground=text, font=("Segoe UI", 10, "bold"))
+        style.configure("SectionTitle.TLabel", background=bg, foreground=text, font=("Segoe UI", 15, "bold"))
+        style.configure("Muted.TLabel", background=bg, foreground=muted, font=("Segoe UI", 9))
+        style.configure("Body.TLabel", background=card, foreground=text)
+        style.configure("HeaderValue.TLabel", background=bg, foreground=muted)
+        style.configure("Primary.TButton", padding=(12, 8), foreground="#ffffff", background=primary)
+        style.map("Primary.TButton", background=[("active", "#2358c9")])
+        style.configure("Secondary.TButton", padding=(10, 8), background=card)
+        style.configure("Flat.TButton", padding=(8, 6), background=bg)
+        style.configure("TEntry", fieldbackground="#ffffff", bordercolor=border)
+        style.configure("TCheckbutton", background=card)
+        style.configure("TRadiobutton", background=card)
+        style.configure("TFrame", background=bg)
 
     def _build_ui(self) -> None:
-        shell = ttk.Frame(self.root, style="App.TFrame")
-        shell.grid(row=0, column=0, sticky="nsew")
+        container = ttk.Frame(self.root, padding=12)
+        container.grid(row=0, column=0, sticky="nsew")
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
-        shell.columnconfigure(1, weight=1)
-        shell.rowconfigure(0, weight=1)
 
-        sidebar = ttk.Frame(shell, style="Sidebar.TFrame", width=218, padding=(0, 18))
-        sidebar.grid(row=0, column=0, sticky="ns")
-        sidebar.grid_propagate(False)
-        sidebar.columnconfigure(0, weight=1)
-        sidebar.rowconfigure(2, weight=1)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
 
-        brand = ttk.Frame(sidebar, style="Sidebar.TFrame", padding=(20, 0, 12, 18))
-        brand.grid(row=0, column=0, sticky="ew")
-        ttk.Label(brand, text="AdBeam Outreach", style="Brand.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(brand, text="WB sales intelligence", style="BrandMeta.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 0))
+        header = ttk.Frame(container)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="WB INN Extractor", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, textvariable=self.progress_text_var, style="Body.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(header, textvariable=self.clock_var, style="Muted.TLabel").grid(row=0, column=1, sticky="e")
+        header_status = ttk.Frame(header)
+        header_status.grid(row=1, column=1, sticky="e", pady=(4, 0))
+        ttk.Label(header_status, textvariable=self.status_var, style="HeaderValue.TLabel").grid(row=0, column=0)
+        ttk.Label(header_status, textvariable=self.progress_percent_var, style="Body.TLabel").grid(
+            row=0, column=1, padx=(12, 0)
+        )
+        ttk.Progressbar(header, variable=self.progress_value_var, maximum=100, mode="determinate").grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+        )
+        ttk.Label(header, textvariable=self.progress_detail_var, style="Muted.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
 
-        nav = ttk.Frame(sidebar, style="Sidebar.TFrame")
-        nav.grid(row=1, column=0, sticky="new")
-        nav.columnconfigure(0, weight=1)
-        nav_items = [
-            ("extract", "Кампания"),
-            ("registry", "Реестр ИНН"),
-            ("kontur", "Контур"),
-            ("excel", "Объединение Excel"),
-            ("audit", "Аудит сайтов"),
-            ("conference", "Конференция ICP-1"),
-        ]
-        for row, (key, label) in enumerate(nav_items):
-            button = ttk.Button(nav, text=label, style="Nav.TButton", command=lambda key=key: self._show_page(key))
-            button.grid(row=row, column=0, sticky="ew", pady=1)
-            self._nav_buttons[key] = button
+        notebook = ttk.Notebook(container)
+        notebook.grid(row=1, column=0, sticky="nsew")
 
-        sidebar_footer = ttk.Frame(sidebar, style="Sidebar.TFrame", padding=(12, 8, 12, 0))
-        sidebar_footer.grid(row=3, column=0, sticky="sew")
-        sidebar_footer.columnconfigure(0, weight=1)
-        self.theme_button = ttk.Button(sidebar_footer, text="Темная тема", style="Theme.TButton", command=self._toggle_theme)
-        self.theme_button.grid(row=0, column=0, sticky="ew")
-        ttk.Label(sidebar_footer, text="Локальное приложение", style="BrandMeta.TLabel").grid(row=1, column=0, sticky="w", padx=5, pady=(10, 0))
+        extract_tab = ttk.Frame(notebook, padding=8)
+        conference_tab = ttk.Frame(notebook, padding=8)
+        adbeam_tab = ttk.Frame(notebook, padding=8)
+        registry_tab = ttk.Frame(notebook, padding=8)
+        kontur_tab = ttk.Frame(notebook, padding=8)
+        excel_merge_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(extract_tab, text="Извлечение ИНН")
+        notebook.add(registry_tab, text="Реестр ИНН")
+        notebook.add(kontur_tab, text="Склейка с Контур")
+        notebook.add(excel_merge_tab, text="Объединение Excel")
+        notebook.add(adbeam_tab, text="Аудит сайтов")
+        notebook.add(conference_tab, text="Конференция ICP-1")
 
-        body = ttk.Frame(shell, style="App.TFrame")
-        body.grid(row=0, column=1, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(1, weight=1)
-
-        topbar = ttk.Frame(body, style="Topbar.TFrame", padding=(22, 14, 22, 12))
-        topbar.grid(row=0, column=0, sticky="ew")
-        topbar.columnconfigure(0, weight=1)
-        ttk.Label(topbar, textvariable=self.page_title_var, style="PageTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(topbar, textvariable=self.page_subtitle_var, style="PageSubtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 0))
-        ttk.Label(topbar, textvariable=self.clock_var, style="PageSubtitle.TLabel").grid(row=0, column=1, sticky="e")
-        status_line = ttk.Frame(topbar, style="Topbar.TFrame")
-        status_line.grid(row=1, column=1, sticky="e", pady=(3, 0))
-        ttk.Label(status_line, textvariable=self.status_var, style="HeaderValue.TLabel").grid(row=0, column=0)
-        ttk.Label(status_line, textvariable=self.progress_percent_var, style="Body.TLabel").grid(row=0, column=1, padx=(12, 0))
-        ttk.Progressbar(topbar, variable=self.progress_value_var, maximum=100, mode="determinate").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-
-        content_host = ttk.Frame(body, style="App.TFrame", padding=(18, 16, 18, 18))
-        content_host.grid(row=1, column=0, sticky="nsew")
-        content_host.columnconfigure(0, weight=1)
-        content_host.rowconfigure(0, weight=1)
-
-        for key in ("extract", "registry", "kontur", "excel", "audit", "conference"):
-            page = ttk.Frame(content_host, style="App.TFrame")
-            page.grid(row=0, column=0, sticky="nsew")
-            page.columnconfigure(0, weight=1)
-            page.rowconfigure(0, weight=1)
-            self._pages[key] = page
-
-        self._build_extract_page(self._pages["extract"])
-        self._build_scrollable_page(self._pages["registry"], self._build_registry_tab, "registry_canvas")
-        self._build_compass_block(self._pages["kontur"]).grid(row=0, column=0, sticky="new")
-        self._build_excel_merge_tab(self._pages["excel"]).grid(row=0, column=0, sticky="nsew")
-        self._build_adbeam_tab(self._pages["audit"]).grid(row=0, column=0, sticky="nsew")
-        self._build_conference_tab(self._pages["conference"]).grid(row=0, column=0, sticky="nsew")
-
-        self._restore_settings_to_widgets()
-        self._show_page(self._active_page)
-        self.theme_button.configure(text="Светлая тема" if self.theme_var.get() == "dark" else "Темная тема")
-        self._refresh_pipeline()
-        self._refresh_classic_widget_colors()
-
-    def _build_scrollable_page(self, parent: ttk.Frame, builder, canvas_attr: str) -> None:
-        canvas = tk.Canvas(parent, background=self._colors["bg"], borderwidth=0, highlightthickness=0)
-        setattr(self, canvas_attr, canvas)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        content = ttk.Frame(canvas, style="App.TFrame", padding=(0, 0, 8, 8))
-        content.columnconfigure(0, weight=1)
-        window = canvas.create_window((0, 0), window=content, anchor="nw")
-        builder(content).grid(row=0, column=0, sticky="nsew")
-        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
-
-        def scroll_page(event) -> None:
-            if event.delta:
-                canvas.yview_scroll(-int(event.delta / 120), "units")
-
-        canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", scroll_page))
-        canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
-
-    def _build_extract_page(self, parent: ttk.Frame) -> None:
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        extract_tab.columnconfigure(0, weight=1)
+        extract_tab.rowconfigure(0, weight=1)
         self.extract_canvas = tk.Canvas(
-            parent,
-            background=self._colors["bg"],
+            extract_tab,
+            background="#f4f7fb",
             borderwidth=0,
             highlightthickness=0,
         )
         self.extract_canvas.grid(row=0, column=0, sticky="nsew")
-        extract_scrollbar = ttk.Scrollbar(parent, orient="vertical", command=self.extract_canvas.yview)
+        extract_scrollbar = ttk.Scrollbar(extract_tab, orient="vertical", command=self.extract_canvas.yview)
         extract_scrollbar.grid(row=0, column=1, sticky="ns")
         self.extract_canvas.configure(yscrollcommand=extract_scrollbar.set)
 
-        self.extract_content = ttk.Frame(self.extract_canvas, style="App.TFrame", padding=(0, 0, 8, 8))
-        self.extract_content.columnconfigure(0, weight=1)
-        extract_window = self.extract_canvas.create_window((0, 0), window=self.extract_content, anchor="nw")
-        self.extract_content.bind(
+        extract_content = ttk.Frame(self.extract_canvas, padding=(0, 0, 8, 8))
+        extract_content.columnconfigure(0, weight=1)
+        extract_window = self.extract_canvas.create_window((0, 0), window=extract_content, anchor="nw")
+        extract_content.bind(
             "<Configure>",
             lambda _event: self.extract_canvas.configure(scrollregion=self.extract_canvas.bbox("all")),
         )
         self.extract_canvas.bind(
             "<Configure>",
-            lambda event: self._resize_extract_canvas(event.width, extract_window),
+            lambda event: self.extract_canvas.itemconfigure(extract_window, width=event.width),
         )
 
         def scroll_extract(event) -> None:
@@ -403,149 +238,49 @@ class App:
             "<Leave>", lambda _event: self.extract_canvas.unbind_all("<MouseWheel>")
         )
 
-        self._build_pipeline_block(self.extract_content).grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        self._build_source_block(self.extract_content).grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self._build_source_block(extract_content).grid(row=0, column=0, sticky="ew", pady=(0, 10))
 
-        self.extract_top_grid = ttk.Frame(self.extract_content, style="App.TFrame")
-        self.extract_top_grid.grid(row=2, column=0, sticky="nsew", pady=(0, 12))
-        self.extract_top_grid.columnconfigure(0, weight=1)
-        self.extract_top_grid.columnconfigure(1, weight=1)
+        top_grid = ttk.Frame(extract_content)
+        top_grid.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        top_grid.columnconfigure(0, weight=1, uniform="top_halves")
+        top_grid.columnconfigure(1, weight=1, uniform="top_halves")
+        top_grid.rowconfigure(0, weight=1)
 
-        self.sheet_block = self._build_sheet_block(self.extract_top_grid)
-        self.sample_block = self._build_sample_block(self.extract_top_grid)
-        self._layout_extract_top(1200)
+        self._build_sheet_block(top_grid).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self._build_sample_block(top_grid).grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        mid_grid = ttk.Frame(self.extract_content, style="App.TFrame")
-        mid_grid.grid(row=3, column=0, sticky="nsew", pady=(0, 12))
+        mid_grid = ttk.Frame(extract_content)
+        mid_grid.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         mid_grid.columnconfigure(0, weight=1)
         mid_grid.rowconfigure(0, weight=1)
 
         self._build_wb_block(mid_grid).grid(row=0, column=0, sticky="nsew")
 
-        self._build_status_log_block(self.extract_content).grid(row=4, column=0, sticky="nsew")
+        self._build_status_log_block(extract_content).grid(row=4, column=0, sticky="nsew")
 
-    def _resize_extract_canvas(self, width: int, extract_window: int) -> None:
-        self.extract_canvas.itemconfigure(extract_window, width=width)
-        self._layout_extract_top(width)
+        conference_tab.columnconfigure(0, weight=1)
+        conference_tab.rowconfigure(0, weight=1)
+        self._build_conference_tab(conference_tab).grid(row=0, column=0, sticky="nsew")
 
-    def _layout_extract_top(self, width: int) -> None:
-        if not hasattr(self, "sheet_block"):
-            return
-        self.sheet_block.grid_forget()
-        self.sample_block.grid_forget()
-        if width >= 1500:
-            self.extract_top_grid.columnconfigure(0, weight=1, uniform="top_halves")
-            self.extract_top_grid.columnconfigure(1, weight=1, uniform="top_halves")
-            self.sheet_block.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-            self.sample_block.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        else:
-            self.extract_top_grid.columnconfigure(0, weight=1, uniform="")
-            self.extract_top_grid.columnconfigure(1, weight=0, uniform="")
-            self.sheet_block.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 12))
-            self.sample_block.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        adbeam_tab.columnconfigure(0, weight=1)
+        adbeam_tab.rowconfigure(0, weight=1)
+        self._build_adbeam_tab(adbeam_tab).grid(row=0, column=0, sticky="nsew")
 
-    def _build_pipeline_block(self, parent: ttk.Frame) -> ttk.Frame:
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=(16, 12))
-        for column in range(5):
-            frame.columnconfigure(column, weight=1, uniform="pipeline")
-        steps = [
-            ("1", "Источник", "Excel MarketGuru"),
-            ("2", "Листы", "Выбор и проверка"),
-            ("3", "Sample", "Уникальные sellers"),
-            ("4", "ИНН", "Пакетный прогон"),
-            ("5", "Контур", "Итоговая склейка"),
-        ]
-        for column, (number, title, meta) in enumerate(steps):
-            step = ttk.Frame(frame)
-            step.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 5, 0 if column == 4 else 5))
-            step.columnconfigure(1, weight=1)
-            state_label = ttk.Label(step, text=number, style="PipelineIdle.TLabel", anchor="center", width=3)
-            state_label.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 8))
-            ttk.Label(step, text=title, style="PipelineTitle.TLabel").grid(row=0, column=1, sticky="w")
-            meta_label = ttk.Label(step, text=meta, style="PipelineMeta.TLabel")
-            meta_label.grid(row=1, column=1, sticky="w", pady=(2, 0))
-            self._pipeline_labels.append((state_label, meta_label))
-        return frame
+        registry_tab.columnconfigure(0, weight=1)
+        registry_tab.rowconfigure(0, weight=1)
+        self._build_registry_tab(registry_tab).grid(row=0, column=0, sticky="nsew")
 
-    def _show_page(self, key: str) -> None:
-        if key not in self._pages:
-            return
-        page_meta = {
-            "extract": ("Извлечение ИНН", "MarketGuru, Wildberries и подготовка данных для Контур"),
-            "registry": ("Реестр ИНН", "Найденные реквизиты, история продавцов и защита от повторов"),
-            "kontur": ("Склейка с Контур", "Объединение результатов WB с выгрузкой Контур.Поиск клиентов"),
-            "excel": ("Объединение Excel", "Сбор выгрузок MarketGuru в одну рабочую книгу"),
-            "audit": ("Аудит сайтов", "Проверка сайтов и подготовка контактных данных"),
-            "conference": ("Конференция ICP-1", "Очередь компаний и автоматический поиск контактов"),
-        }
-        self._active_page = key
-        self._pages[key].tkraise()
-        self.page_title_var.set(page_meta[key][0])
-        self.page_subtitle_var.set(page_meta[key][1])
-        for page_key, button in self._nav_buttons.items():
-            button.configure(style="NavActive.TButton" if page_key == key else "Nav.TButton")
+        kontur_tab.columnconfigure(0, weight=1)
+        kontur_tab.rowconfigure(0, weight=1)
+        self._build_compass_block(kontur_tab).grid(row=0, column=0, sticky="new")
 
-    def _toggle_theme(self) -> None:
-        self.theme_var.set("dark" if self.theme_var.get() == "light" else "light")
-        self._configure_theme()
-        self._refresh_classic_widget_colors()
-        self.theme_button.configure(text="Светлая тема" if self.theme_var.get() == "dark" else "Темная тема")
-        self._save_settings()
-
-    def _refresh_classic_widget_colors(self) -> None:
-        colors = self._colors
-        for name in ("extract_canvas", "registry_canvas"):
-            canvas = getattr(self, name, None)
-            if canvas is not None:
-                canvas.configure(background=colors["bg"])
-        for name in ("sheet_listbox", "registry_batch_listbox"):
-            widget = getattr(self, name, None)
-            if widget is not None:
-                widget.configure(
-                    bg=colors["surface_alt"],
-                    fg=colors["text"],
-                    selectbackground=colors["primary"],
-                    selectforeground="#ffffff",
-                    highlightbackground=colors["border"],
-                    highlightcolor=colors["primary"],
-                )
-        for name in ("log_text", "registry_summary_text", "adbeam_output_text", "conference_output_text"):
-            widget = getattr(self, name, None)
-            if widget is not None:
-                widget.configure(
-                    bg=colors["log_bg"],
-                    fg=colors["text"],
-                    insertbackground=colors["text"],
-                    highlightbackground=colors["border"],
-                    highlightcolor=colors["primary"],
-                )
-
-    def _refresh_pipeline(self) -> None:
-        if not self._pipeline_labels:
-            return
-        states = [
-            bool(self.input_path_var.get().strip()),
-            self._last_analyze_summary is not None,
-            Path(self.sample_output_var.get().strip()).exists() if self.sample_output_var.get().strip() else False,
-            Path(self.batch_output_var.get().strip()).exists() if self.batch_output_var.get().strip() else False,
-            Path(self.enriched_output_var.get().strip()).exists() if self.enriched_output_var.get().strip() else False,
-        ]
-        first_pending = next((index for index, ready in enumerate(states) if not ready), len(states) - 1)
-        meta_ready = ["Файл выбран", "Книга проверена", "Sample готов", "Batch сохранен", "Enriched готов"]
-        meta_idle = ["Выберите Excel", "Запустите анализ", "Создайте sample", "Запустите batch", "Загрузите выгрузку"]
-        for index, (state_label, meta_label) in enumerate(self._pipeline_labels):
-            if states[index]:
-                state_label.configure(style="PipelineDone.TLabel")
-                meta_label.configure(text=meta_ready[index])
-            elif index == first_pending:
-                state_label.configure(style="PipelineActive.TLabel")
-                meta_label.configure(text=meta_idle[index])
-            else:
-                state_label.configure(style="PipelineIdle.TLabel")
-                meta_label.configure(text=meta_idle[index])
+        excel_merge_tab.columnconfigure(0, weight=1)
+        excel_merge_tab.rowconfigure(0, weight=1)
+        self._build_excel_merge_tab(excel_merge_tab).grid(row=0, column=0, sticky="nsew")
+        self._restore_settings_to_widgets()
 
     def _build_conference_tab(self, parent):
-        frame = ttk.Frame(parent, style="App.TFrame")
+        frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
 
@@ -627,7 +362,7 @@ class App:
         return frame
 
     def _build_adbeam_tab(self, parent):
-        frame = ttk.Frame(parent, style="App.TFrame")
+        frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
 
@@ -690,7 +425,7 @@ class App:
         self.adbeam_output_text.configure(yscrollcommand=scrollbar.set)
         return frame
     def _build_source_block(self, parent):
-        frame = ttk.LabelFrame(parent, text="Источник данных и анализ книги", padding=12, style="Card.TLabelframe")
+        frame = ttk.LabelFrame(parent, text="1. Источник данных и анализ книги", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(1, weight=1)
         ttk.Label(frame, text="Входной Excel", style="Body.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
         ttk.Entry(frame, textvariable=self.input_path_var).grid(row=0, column=1, sticky="ew")
@@ -709,7 +444,7 @@ class App:
         return frame
 
     def _build_sheet_block(self, parent):
-        frame = ttk.LabelFrame(parent, text="Выбор листов для sample", padding=12, style="Card.TLabelframe")
+        frame = ttk.LabelFrame(parent, text="2. Выбор листов для sample", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(3, weight=1)
 
@@ -753,7 +488,7 @@ class App:
         return frame
 
     def _build_sample_block(self, parent):
-        frame = ttk.LabelFrame(parent, text="Подготовка research sample", padding=12, style="Card.TLabelframe")
+        frame = ttk.LabelFrame(parent, text="3. Подготовка research sample", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(1, weight=1)
 
         ttk.Label(frame, text="Файл research sample", style="Body.TLabel").grid(row=0, column=0, sticky="w", pady=4)
@@ -780,7 +515,7 @@ class App:
         return frame
 
     def _build_wb_block(self, parent):
-        frame = ttk.LabelFrame(parent, text="Парсинг Wildberries", padding=12, style="Card.TLabelframe")
+        frame = ttk.LabelFrame(parent, text="4. Парсинг Wildberries", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(1, weight=1)
 
         fields = [
@@ -849,7 +584,7 @@ class App:
         return frame
 
     def _build_excel_merge_tab(self, parent):
-        frame = ttk.Frame(parent, style="App.TFrame")
+        frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
 
         source = ttk.LabelFrame(frame, text="Источник", padding=12, style="Card.TLabelframe")
@@ -911,7 +646,7 @@ class App:
         return frame
 
     def _build_registry_tab(self, parent):
-        frame = ttk.Frame(parent, style="App.TFrame")
+        frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1, minsize=220)
 
@@ -1063,7 +798,7 @@ class App:
         return frame
 
     def _build_status_log_block(self, parent):
-        frame = ttk.LabelFrame(parent, text="Статус операции", padding=12, style="Card.TLabelframe")
+        frame = ttk.LabelFrame(parent, text="6. Статус, прогресс и лог", padding=12, style="Card.TLabelframe")
         frame.columnconfigure(0, weight=1)
 
         top = ttk.Frame(frame)
@@ -1074,8 +809,6 @@ class App:
         ttk.Label(top, textvariable=self.progress_text_var, style="Body.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(top, textvariable=self.progress_percent_var, style="Body.TLabel").grid(row=0, column=1)
         ttk.Label(top, textvariable=self.clock_var, style="Muted.TLabel").grid(row=0, column=2, sticky="e")
-        self.log_toggle_button = ttk.Button(top, text="Свернуть лог", command=self._toggle_log, style="Flat.TButton")
-        self.log_toggle_button.grid(row=0, column=3, sticky="e", padx=(12, 0))
 
         self.progressbar = ttk.Progressbar(frame, variable=self.progress_value_var, maximum=100, mode="determinate")
         self.progressbar.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -1091,14 +824,14 @@ class App:
         ttk.Button(tool_row, text="Открыть final_enriched.xlsx", command=self._open_enriched_output, style="Secondary.TButton").grid(row=0, column=3, sticky="ew", padx=6)
         ttk.Button(tool_row, text="Очистить лог", command=self._clear_log, style="Secondary.TButton").grid(row=0, column=4, sticky="ew", padx=(6, 0))
 
-        self.log_frame = ttk.Frame(frame)
-        self.log_frame.grid(row=4, column=0, sticky="nsew")
-        self.log_frame.columnconfigure(0, weight=1)
-        self.log_frame.rowconfigure(0, weight=1)
+        log_frame = ttk.Frame(frame)
+        log_frame.grid(row=4, column=0, sticky="nsew")
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
         frame.rowconfigure(4, weight=1)
 
         self.log_text = tk.Text(
-            self.log_frame,
+            log_frame,
             wrap="word",
             bg="#ffffff",
             fg="#1f2a37",
@@ -1110,19 +843,10 @@ class App:
             font=("Consolas", 10),
         )
         self.log_text.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log_text.yview)
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
         return frame
-
-    def _toggle_log(self) -> None:
-        self._log_visible = not self._log_visible
-        if self._log_visible:
-            self.log_frame.grid()
-            self.log_toggle_button.configure(text="Свернуть лог")
-        else:
-            self.log_frame.grid_remove()
-            self.log_toggle_button.configure(text="Показать лог")
 
     def _bind_settings_save(self) -> None:
         self._tracked_vars = [
@@ -1211,7 +935,6 @@ class App:
 
     def _tick_clock(self) -> None:
         self.clock_var.set(datetime.now().strftime("Сейчас: %d.%m.%Y %H:%M:%S"))
-        self._refresh_pipeline()
         self.root.after(1000, self._tick_clock)
 
     def _load_settings(self) -> None:
@@ -1294,8 +1017,7 @@ class App:
             self.selection_summary_var.set(summary)
         sample_summary = settings.get("sample_summary")
         if isinstance(sample_summary, str) and sample_summary:
-            summary_first_line = sample_summary.splitlines()[0].split(" | старт batch:", 1)[0]
-            self.sample_summary_var.set(f"{summary_first_line} | старт batch: 2")
+            self.sample_summary_var.set(f"{sample_summary.splitlines()[0]} | старт batch: 2")
         sample_filter_summary = settings.get("sample_filter_summary")
         if isinstance(sample_filter_summary, str) and sample_filter_summary:
             filter_state = "включены" if self.sample_use_known_sellers_var.get() else "отключены"
@@ -1322,7 +1044,6 @@ class App:
             return
         try:
             data = {
-                "theme": self.theme_var.get(),
                 "input_path": self.input_path_var.get().strip(),
                 "sample_output": self.sample_output_var.get().strip(),
                 "conference_input_path": self.conference_input_path_var.get().strip(),
@@ -1359,7 +1080,7 @@ class App:
                 "registry_batch_files": list(self._registry_batch_files),
                 "registry_summary": self.registry_summary_var.get(),
                 "sheet_mode": self.sheet_mode_var.get(),
-                "selected_sheets": self._get_selected_sheets_for_settings(),
+                "selected_sheets": self._get_selected_sheet_names_from_ui() if hasattr(self, "sheet_listbox") else [],
                 "selection_summary": self.selection_summary_var.get(),
                 "sample_summary": self.sample_summary_var.get(),
                 "sample_filter_summary": self.sample_filter_summary_var.get(),
@@ -1368,11 +1089,6 @@ class App:
             SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
-
-    def _get_selected_sheets_for_settings(self) -> list[str]:
-        if hasattr(self, "sheet_listbox") and self.sheet_listbox.size() > 0:
-            return self._get_selected_sheet_names_from_ui()
-        return list(self._settings_loaded_selected_sheets)
 
     def _set_registry_summary(self, text: str) -> None:
         self.registry_summary_var.set(text)

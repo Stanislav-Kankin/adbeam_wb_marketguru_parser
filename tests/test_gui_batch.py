@@ -29,19 +29,7 @@ class _Root:
         self.window_title = value
 
 
-class _EmptyListbox:
-    def size(self):
-        return 0
-
-
 class GuiBatchTests(unittest.TestCase):
-    def test_settings_keep_loaded_sheet_selection_before_analysis(self) -> None:
-        app = App.__new__(App)
-        app.sheet_listbox = _EmptyListbox()
-        app._settings_loaded_selected_sheets = ["1", "2", "3"]
-
-        self.assertEqual(app._get_selected_sheets_for_settings(), ["1", "2", "3"])
-
     def test_settings_loader_accepts_utf8_bom(self) -> None:
         with TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / ".wb_inn_gui_settings.json"
