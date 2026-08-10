@@ -5,7 +5,6 @@ from contextlib import ExitStack
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
 import traceback
@@ -49,13 +48,7 @@ from .models import AnalyzeSummary
 from .wb_research import BatchInspector, build_row_error_result, inspect_product_row
 
 
-APP_HOME = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "AdBeam Outreach"
-APP_DATA_DIR = APP_HOME / "data"
-PARSER_HOME = Path.home() / "Desktop" / "AdBeam" / "тест_парсер"
-APP_ARTIFACTS_DIR = PARSER_HOME / "artifacts"
-APP_PROFILE_DIR = PARSER_HOME / "wb_profile"
-SETTINGS_PATH = APP_HOME / "settings.json"
-LEGACY_SETTINGS_FILENAME = ".wb_inn_gui_settings.json"
+SETTINGS_PATH = Path(".wb_inn_gui_settings.json")
 
 THEMES = {
     "light": {
@@ -104,8 +97,8 @@ class App:
 
         self.input_path_var = tk.StringVar()
         self.sample_output_var = tk.StringVar(value=str(Path("output/research_sample.xlsx")))
-        self.artifacts_dir_var = tk.StringVar(value=str(APP_ARTIFACTS_DIR))
-        self.profile_dir_var = tk.StringVar(value=str(APP_PROFILE_DIR))
+        self.artifacts_dir_var = tk.StringVar(value=str(Path("output/artifacts")))
+        self.profile_dir_var = tk.StringVar(value=str(Path("output/wb_profile")))
         self.limit_var = tk.StringVar(value="")
         self.row_var = tk.StringVar(value="2")
         self.batch_count_var = tk.StringVar(value="5")
@@ -113,12 +106,12 @@ class App:
         self.merge_batch_input_var = tk.StringVar(value=str(Path("output/batch_results.xlsx")))
         self.compass_input_var = tk.StringVar()
         self.enriched_output_var = tk.StringVar(value=str(Path("output/final_enriched.xlsx")))
-        self.registry_path_var = tk.StringVar(value=str(APP_DATA_DIR / "inn_registry.xlsx"))
-        self.seller_history_path_var = tk.StringVar(value=str(APP_DATA_DIR / "seller_history.xlsx"))
-        self.registry_new_inn_output_var = tk.StringVar(value=str(APP_DATA_DIR / "new_inn_for_kontur.xlsx"))
-        self.registry_merge_primary_var = tk.StringVar(value=str(APP_DATA_DIR / "inn_registry.xlsx"))
+        self.registry_path_var = tk.StringVar(value=str(Path("output/inn_registry.xlsx")))
+        self.seller_history_path_var = tk.StringVar(value=str(Path("output/seller_history.xlsx")))
+        self.registry_new_inn_output_var = tk.StringVar(value=str(Path("output/new_inn_for_kontur.xlsx")))
+        self.registry_merge_primary_var = tk.StringVar(value=str(Path("output/inn_registry.xlsx")))
         self.registry_merge_secondary_var = tk.StringVar()
-        self.registry_merge_output_var = tk.StringVar(value=str(APP_DATA_DIR / "inn_registry_merged.xlsx"))
+        self.registry_merge_output_var = tk.StringVar(value=str(Path("output/inn_registry_merged.xlsx")))
         self.registry_summary_var = tk.StringVar(value="Реестр ещё не обновлялся")
         self.excel_merge_source_var = tk.StringVar()
         self.excel_merge_output_xlsx_var = tk.StringVar(value=str(Path("output/merged_tabs.xlsx")))
@@ -153,8 +146,6 @@ class App:
         self.progress_percent_var = tk.StringVar(value="0%")
         self.progress_value_var = tk.DoubleVar(value=0.0)
         self.theme_var = tk.StringVar(value="light")
-        self.auto_batch_paths_var = tk.BooleanVar(value=True)
-        self.batch_paths_summary_var = tk.StringVar(value="Папка текущего результата еще не определена")
         self.page_title_var = tk.StringVar(value="Извлечение ИНН")
         self.page_subtitle_var = tk.StringVar(value="MarketGuru, Wildberries и подготовка данных для Контур")
 
@@ -179,8 +170,6 @@ class App:
         self._build_ui()
         self._show_settings_load_error()
         self._bind_settings_save()
-        if self._settings_needs_migration:
-            self._save_settings()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick_clock()
 
@@ -810,18 +799,8 @@ class App:
 
         ttk.Checkbutton(frame, text="Показывать браузер при обычном inspect", variable=self.headful_var).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 10))
 
-        ttk.Checkbutton(
-            frame,
-            text="Привязать batch к sample; использовать общие artifacts и профиль WB",
-            variable=self.auto_batch_paths_var,
-            command=self._on_auto_batch_paths_changed,
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 10))
-        ttk.Label(frame, textvariable=self.batch_paths_summary_var, style="Muted.TLabel").grid(
-            row=7, column=0, columnspan=3, sticky="w", pady=(0, 10)
-        )
-
         actions = ttk.Frame(frame)
-        actions.grid(row=8, column=0, columnspan=3, sticky="ew")
+        actions.grid(row=6, column=0, columnspan=3, sticky="ew")
         actions.columnconfigure(0, weight=1)
         actions.columnconfigure(1, weight=1)
         ttk.Button(
@@ -1182,7 +1161,6 @@ class App:
         self.excel_merge_create_zip_var.trace_add("write", lambda *_: self._save_settings())
         self.conference_autosearch_only_p1_var.trace_add("write", lambda *_: self._save_settings())
         self.sample_use_known_sellers_var.trace_add("write", lambda *_: self._save_settings())
-        self.sample_output_var.trace_add("write", lambda *_: self._on_sample_output_changed())
 
     def _open_registry_path(self) -> None:
         path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
@@ -1239,35 +1217,16 @@ class App:
     def _load_settings(self) -> None:
         self._loaded_settings = {}
         self._settings_load_error = None
-        self._settings_needs_migration = False
-        settings_path = SETTINGS_PATH
-        if not settings_path.exists():
-            settings_path = next((path for path in self._legacy_settings_paths() if path.exists()), SETTINGS_PATH)
-        if not settings_path.exists():
+        if not SETTINGS_PATH.exists():
             return
         try:
-            loaded = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+            loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8-sig"))
             if not isinstance(loaded, dict):
                 raise ValueError("корневой элемент настроек должен быть объектом")
             self._loaded_settings = loaded
-            self._settings_needs_migration = settings_path.resolve() != SETTINGS_PATH.resolve()
         except Exception as exc:
             self._loaded_settings = {}
-            self._settings_load_error = f"Не удалось прочитать {settings_path.resolve()}: {exc}"
-
-    @staticmethod
-    def _legacy_settings_paths() -> list[Path]:
-        candidates = []
-        if getattr(sys, "frozen", False):
-            candidates.append(Path(sys.executable).resolve().parent / LEGACY_SETTINGS_FILENAME)
-        candidates.append(Path.cwd() / LEGACY_SETTINGS_FILENAME)
-        candidates.append(Path(__file__).resolve().parents[2] / LEGACY_SETTINGS_FILENAME)
-        unique = []
-        for path in candidates:
-            resolved = path.resolve()
-            if resolved not in unique:
-                unique.append(resolved)
-        return unique
+            self._settings_load_error = f"Не удалось прочитать {SETTINGS_PATH.resolve()}: {exc}"
 
     def _show_settings_load_error(self) -> None:
         if not self._settings_load_error:
@@ -1327,8 +1286,6 @@ class App:
             self.conference_autosearch_only_p1_var.set(bool(settings["conference_autosearch_only_p1"]))
         if "sample_use_known_sellers" in settings:
             self.sample_use_known_sellers_var.set(bool(settings["sample_use_known_sellers"]))
-        if "auto_batch_paths" in settings:
-            self.auto_batch_paths_var.set(bool(settings["auto_batch_paths"]))
         loaded = settings.get("selected_sheets")
         if isinstance(loaded, list):
             self._settings_loaded_selected_sheets = [str(x) for x in loaded]
@@ -1359,9 +1316,6 @@ class App:
         if isinstance(registry_batch_files, list):
             self._registry_batch_files = [str(path) for path in registry_batch_files]
             self._refresh_registry_batch_listbox()
-        self._normalize_shared_data_paths()
-        if self.auto_batch_paths_var.get():
-            self._sync_batch_paths_to_sample()
 
     def _save_settings(self) -> None:
         if self._settings_load_error:
@@ -1379,7 +1333,6 @@ class App:
                 "conference_autosearch_only_p1": bool(self.conference_autosearch_only_p1_var.get()),
                 "conference_summary": self.conference_summary_var.get(),
                 "sample_use_known_sellers": bool(self.sample_use_known_sellers_var.get()),
-                "auto_batch_paths": bool(self.auto_batch_paths_var.get()),
                 "adbeam_input_path": self.adbeam_input_path_var.get().strip(),
                 "adbeam_output_path": self.adbeam_output_path_var.get().strip(),
                 "adbeam_summary": self.adbeam_summary_var.get(),
@@ -1412,9 +1365,7 @@ class App:
                 "sample_filter_summary": self.sample_filter_summary_var.get(),
                 "headful": bool(self.headful_var.get()),
             }
-            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
             SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._settings_needs_migration = False
         except Exception:
             pass
 
@@ -1422,19 +1373,6 @@ class App:
         if hasattr(self, "sheet_listbox") and self.sheet_listbox.size() > 0:
             return self._get_selected_sheet_names_from_ui()
         return list(self._settings_loaded_selected_sheets)
-
-    def _normalize_shared_data_paths(self) -> None:
-        bindings = [
-            (self.registry_path_var, APP_DATA_DIR / "inn_registry.xlsx"),
-            (self.seller_history_path_var, APP_DATA_DIR / "seller_history.xlsx"),
-            (self.registry_new_inn_output_var, APP_DATA_DIR / "new_inn_for_kontur.xlsx"),
-            (self.registry_merge_primary_var, APP_DATA_DIR / "inn_registry.xlsx"),
-            (self.registry_merge_output_var, APP_DATA_DIR / "inn_registry_merged.xlsx"),
-        ]
-        for var, fallback in bindings:
-            raw = var.get().strip()
-            if not raw or not Path(raw).is_absolute():
-                var.set(str(fallback))
 
     def _set_registry_summary(self, text: str) -> None:
         self.registry_summary_var.set(text)
@@ -1531,70 +1469,6 @@ class App:
         )
         if path:
             self.sample_output_var.set(path)
-
-    def _on_sample_output_changed(self) -> None:
-        if self.auto_batch_paths_var.get():
-            self._sync_batch_paths_to_sample()
-
-    def _on_auto_batch_paths_changed(self) -> None:
-        if self.auto_batch_paths_var.get():
-            self._sync_batch_paths_to_sample()
-        self._save_settings()
-
-    @staticmethod
-    def _expected_batch_paths(sample_path: Path) -> dict[str, Path]:
-        base_dir = sample_path.expanduser().resolve(strict=False).parent
-        return {
-            "batch_output": base_dir / "batch_results.xlsx",
-            "artifacts_dir": APP_ARTIFACTS_DIR,
-            "profile_dir": APP_PROFILE_DIR,
-            "merge_batch_input": base_dir / "batch_results.xlsx",
-            "enriched_output": base_dir / "final_enriched.xlsx",
-        }
-
-    def _sync_batch_paths_to_sample(self) -> None:
-        raw_sample = self.sample_output_var.get().strip()
-        if not raw_sample:
-            return
-        expected = self._expected_batch_paths(Path(raw_sample))
-        self.batch_paths_summary_var.set(f"Папка текущего результата: {expected['batch_output'].parent}")
-        bindings = {
-            "batch_output": self.batch_output_var,
-            "artifacts_dir": self.artifacts_dir_var,
-            "profile_dir": self.profile_dir_var,
-            "merge_batch_input": self.merge_batch_input_var,
-            "enriched_output": self.enriched_output_var,
-        }
-        for key, var in bindings.items():
-            value = str(expected[key])
-            if var.get().strip() != value:
-                var.set(value)
-
-    def _validate_batch_paths(self, sample_path: Path) -> None:
-        if not self.auto_batch_paths_var.get():
-            return
-        expected = self._expected_batch_paths(sample_path)
-        actual = {
-            "batch_output": Path(self.batch_output_var.get().strip()).resolve(strict=False),
-            "artifacts_dir": Path(self.artifacts_dir_var.get().strip()).resolve(strict=False),
-            "profile_dir": Path(self.profile_dir_var.get().strip()).resolve(strict=False),
-        }
-        labels = {
-            "batch_output": "Итоговый Excel batch",
-            "artifacts_dir": "Папка артефактов",
-            "profile_dir": "Папка профиля WB",
-        }
-        mismatches = [
-            f"{labels[key]}: {actual[key]}\n  должно быть: {expected[key]}"
-            for key in actual
-            if actual[key] != expected[key]
-        ]
-        if mismatches:
-            raise ValueError(
-                "Пакетный прогон остановлен до первой строки: пути не совпадают с рабочей конфигурацией.\n\n"
-                + "\n\n".join(mismatches)
-                + "\n\nВключи автоматическую привязку путей или выбери правильный research sample."
-            )
 
     def _choose_artifacts_dir(self) -> None:
         path = filedialog.askdirectory(title="Папка для артефактов")
@@ -2205,7 +2079,6 @@ class App:
 
     def _action_batch(self) -> None:
         sample_path = self._require_sample_path()
-        self._validate_batch_paths(sample_path)
         start_row = self._parse_positive_int(self.row_var.get(), field_name="Стартовая строка")
         batch_count = self._parse_positive_int(self.batch_count_var.get(), field_name="Количество строк в batch")
         artifacts_dir = Path(self.artifacts_dir_var.get())
@@ -2232,9 +2105,6 @@ class App:
         research_rows = read_research_rows_range(sample_path, start_row=start_row, limit=batch_count)
         total = len(research_rows)
         self._append_log(f"Batch: старт диапазона строк {start_row}-{start_row + max(total - 1, 0)} | sample={sample_path}\n")
-        self._append_log(f"Batch: итоговый файл: {batch_output.resolve(strict=False)}\n")
-        self._append_log(f"Batch: артефакты: {artifacts_dir.resolve(strict=False)}\n")
-        self._append_log(f"Batch: профиль WB: {profile_dir.resolve(strict=False)}\n")
         self._append_log(f"Batch: рабочая папка приложения: {Path.cwd()}\n")
         self._append_log(f"Batch: реестр ИНН: {self._format_path_status(registry_path)}\n")
         self._append_log(f"Batch: история sellers: {self._format_path_status(seller_history_path)}\n")

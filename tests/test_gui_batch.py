@@ -1,10 +1,9 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import tkinter as tk
 import unittest
 from unittest.mock import MagicMock, patch
 
-from wb_inn_extractor.gui import APP_ARTIFACTS_DIR, APP_PROFILE_DIR, App
+from wb_inn_extractor.gui import App
 from wb_inn_extractor.models import InspectResult, ResearchRow
 
 
@@ -36,70 +35,6 @@ class _EmptyListbox:
 
 
 class GuiBatchTests(unittest.TestCase):
-    def test_shared_wb_profile_stays_in_original_test_parser_directory(self) -> None:
-        self.assertEqual(
-            APP_PROFILE_DIR,
-            Path.home() / "Desktop" / "AdBeam" / "тест_парсер" / "wb_profile",
-        )
-
-    def test_shared_artifacts_stay_in_original_test_parser_directory(self) -> None:
-        self.assertEqual(
-            APP_ARTIFACTS_DIR,
-            Path.home() / "Desktop" / "AdBeam" / "тест_парсер" / "artifacts",
-        )
-
-    def test_full_window_builds_with_clean_settings(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            settings_path = Path(temp_dir) / "settings.json"
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                with (
-                    patch("wb_inn_extractor.gui.SETTINGS_PATH", settings_path),
-                    patch.object(App, "_legacy_settings_paths", return_value=[]),
-                ):
-                    app = App(root)
-                    root.update_idletasks()
-                    self.assertEqual(set(app._pages), {"extract", "registry", "kontur", "excel", "audit", "conference"})
-            finally:
-                root.destroy()
-
-    def test_batch_paths_are_derived_from_sample_directory(self) -> None:
-        sample_path = Path("C:/campaign/result/research_sample.xlsx")
-
-        paths = App._expected_batch_paths(sample_path)
-
-        self.assertEqual(paths["batch_output"], Path("C:/campaign/result/batch_results.xlsx"))
-        self.assertEqual(paths["artifacts_dir"], APP_ARTIFACTS_DIR)
-        self.assertEqual(paths["profile_dir"], APP_PROFILE_DIR)
-
-    def test_batch_stops_before_processing_when_auto_paths_do_not_match(self) -> None:
-        app = App.__new__(App)
-        app.auto_batch_paths_var = _Var(True)
-        app.batch_output_var = _Var("C:/another-campaign/batch_results.xlsx")
-        app.artifacts_dir_var = _Var(str(APP_ARTIFACTS_DIR))
-        app.profile_dir_var = _Var(str(APP_PROFILE_DIR))
-
-        with self.assertRaisesRegex(ValueError, "остановлен до первой строки"):
-            app._validate_batch_paths(Path("C:/campaign/result/research_sample.xlsx"))
-
-    def test_settings_migrate_from_legacy_file_to_stable_location(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            stable_path = root / "stable" / "settings.json"
-            legacy_path = root / ".wb_inn_gui_settings.json"
-            legacy_path.write_text('{"profile_dir": "C:/legacy/profile"}', encoding="utf-8")
-            app = App.__new__(App)
-
-            with (
-                patch("wb_inn_extractor.gui.SETTINGS_PATH", stable_path),
-                patch.object(App, "_legacy_settings_paths", return_value=[legacy_path]),
-            ):
-                app._load_settings()
-
-            self.assertEqual(app._loaded_settings["profile_dir"], "C:/legacy/profile")
-            self.assertTrue(app._settings_needs_migration)
-
     def test_settings_keep_loaded_sheet_selection_before_analysis(self) -> None:
         app = App.__new__(App)
         app.sheet_listbox = _EmptyListbox()
@@ -172,7 +107,6 @@ class GuiBatchTests(unittest.TestCase):
             app.registry_path_var = _Var(str(root / "inn_registry.xlsx"))
             app.seller_history_path_var = _Var(str(root / "seller_history.xlsx"))
             app.sample_use_known_sellers_var = _Var(False)
-            app.auto_batch_paths_var = _Var(False)
             app.merge_batch_input_var = _Var("")
             app.root = _Root()
 
@@ -204,7 +138,6 @@ class GuiBatchTests(unittest.TestCase):
             app.registry_path_var = _Var(str(root / "inn_registry.xlsx"))
             app.seller_history_path_var = _Var(str(root / "seller_history.xlsx"))
             app.sample_use_known_sellers_var = _Var(False)
-            app.auto_batch_paths_var = _Var(False)
             app.merge_batch_input_var = _Var("")
             app.root = _Root()
 
