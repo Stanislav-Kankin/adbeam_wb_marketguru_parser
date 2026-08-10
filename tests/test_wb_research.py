@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from wb_inn_extractor.models import InspectResult, ResearchRow
 from wb_inn_extractor.wb_research import (
+    BrowserStartupError,
     BatchInspector,
     _inspect_product_via_public_api,
     _page_has_requisites_entrypoints,
@@ -94,6 +95,22 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIs(result, api_result)
         playwright.assert_not_called()
+
+    def test_failed_browser_start_resets_inspector_state(self):
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch("wb_inn_extractor.wb_research._inspect_product_via_public_api", return_value=None),
+            patch("wb_inn_extractor.wb_research.sync_playwright") as playwright,
+            patch.object(BatchInspector, "_restart_context", side_effect=RuntimeError("Chrome failed")),
+        ):
+            inspector = BatchInspector(Path(temp_dir), headful=True)
+            playwright.return_value.start.return_value = MagicMock()
+
+            with self.assertRaises(BrowserStartupError):
+                inspector.inspect_row(6, self.row)
+
+        self.assertIsNone(inspector._playwright)
+        self.assertIsNone(inspector._context)
 
 
 if __name__ == "__main__":
