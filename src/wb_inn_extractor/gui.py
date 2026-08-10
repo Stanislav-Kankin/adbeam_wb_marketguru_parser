@@ -111,6 +111,7 @@ class App:
 
         self._last_analyze_summary: AnalyzeSummary | None = None
         self._task_started_at: float | None = None
+        self._batch_started_at: float | None = None
         self._progress_total: int = 0
         self._progress_done: int = 0
         self._settings_loaded_selected_sheets: list[str] = []
@@ -1513,7 +1514,7 @@ class App:
     def _set_batch_progress(self, done: int, total: int, row_number: int | None = None, seller: str | None = None) -> None:
         self._progress_done = done
         self._progress_total = total
-        elapsed = time.monotonic() - self._task_started_at if self._task_started_at else 0.0
+        elapsed = time.monotonic() - self._batch_started_at if self._batch_started_at is not None else 0.0
         percent = (done / total * 100.0) if total else 0.0
         avg = (elapsed / done) if done else 0.0
         eta = avg * max(total - done, 0)
@@ -1795,6 +1796,7 @@ class App:
         self.root.after(0, lambda: messagebox.showinfo("Проверка завершена", f"Артефакты сохранены в:\n{artifacts_dir}"))
 
     def _action_batch(self) -> None:
+        self._batch_started_at = time.monotonic()
         sample_path = self._require_sample_path()
         start_row = self._parse_positive_int(self.row_var.get(), field_name="Стартовая строка")
         batch_count = self._parse_positive_int(self.batch_count_var.get(), field_name="Количество строк в batch")

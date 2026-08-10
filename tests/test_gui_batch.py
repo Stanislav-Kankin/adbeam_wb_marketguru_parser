@@ -81,6 +81,27 @@ class GuiBatchTests(unittest.TestCase):
         self.assertIn("ETA: 00:40:00", app.progress_detail_var.get())
         self.assertEqual(app.root.window_title, "WB INN Extractor — 40/200 (20.0%)")
 
+    def test_batch_progress_uses_its_own_timer(self) -> None:
+        app = App.__new__(App)
+        app.root = _Root()
+        app.root.after = lambda _delay, callback: callback()
+        app.progress_text_var = _Var("")
+        app.progress_detail_var = _Var("")
+        app.progress_percent_var = _Var("")
+        app.progress_value_var = _Var(0.0)
+        app._task_started_at = None
+        app._batch_started_at = 100.0
+        app._progress_done = 0
+        app._progress_total = 0
+
+        with patch("wb_inn_extractor.gui.time.monotonic", return_value=160.0):
+            app._set_batch_progress(done=20, total=100)
+
+        self.assertIn("Прошло: 00:01:00", app.progress_detail_var.get())
+        self.assertIn("ETA: 00:04:00", app.progress_detail_var.get())
+        self.assertIn("Среднее: 3.0 сек/строка", app.progress_detail_var.get())
+        self.assertEqual(app.root.window_title, "WB INN Extractor — 20/100 (20.0%)")
+
     def test_batch_reads_known_seller_filter_toggle(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
