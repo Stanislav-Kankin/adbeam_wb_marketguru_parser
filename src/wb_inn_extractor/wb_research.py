@@ -20,6 +20,11 @@ PRODUCT_READY_TIMEOUT_MS = 30_000
 FAST_PAGE_READY_TIMEOUT_MS = 8_000
 REQUISITES_APPEAR_TIMEOUT_MS = 1_500
 PUBLIC_API_TIMEOUT_SECONDS = 2
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/150.0.0.0 Safari/537.36"
+)
 SELLER_GOTO_TIMEOUT_MS = 12_000
 WAIT_FOR_LOAD_STATE_TIMEOUT_MS = 8_000
 MAX_BATCH_ROW_ATTEMPTS = 3
@@ -566,10 +571,7 @@ def _load_public_wb_json(url: str) -> dict:
         headers={
             "Accept": "application/json",
             "Referer": "https://www.wildberries.ru/",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": BROWSER_USER_AGENT,
         },
     )
     with urlopen(request, timeout=PUBLIC_API_TIMEOUT_SECONDS) as response:
@@ -1057,9 +1059,13 @@ def _open_system_chrome_session(playwright, profile_dir: Path) -> _BrowserSessio
             str(chrome_path),
             f"--remote-debugging-port={debug_port}",
             f"--user-data-dir={profile_dir.resolve()}",
+            "--headless=new",
+            "--disable-blink-features=AutomationControlled",
+            f"--user-agent={BROWSER_USER_AGENT}",
+            "--window-size=1600,1400",
+            "--enable-quic",
             "--no-first-run",
             "--no-default-browser-check",
-            "--start-maximized",
             "about:blank",
         ],
         stdout=subprocess.DEVNULL,

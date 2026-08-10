@@ -9,6 +9,7 @@ from wb_inn_extractor.wb_research import (
     BatchInspector,
     _inspect_product_via_browser_network_api,
     _inspect_product_via_public_api,
+    _open_system_chrome_session,
     _page_has_requisites_entrypoints,
     _trigger_supplier_tooltip,
     _wait_for_product_page_ready,
@@ -143,6 +144,30 @@ class PublicApiTests(unittest.TestCase):
 
         self.assertIsNone(inspector._playwright)
         self.assertIsNone(inspector._context)
+
+    def test_system_chrome_uses_hidden_quic_mode(self):
+        playwright = MagicMock()
+        browser = MagicMock()
+        browser.contexts = [MagicMock()]
+        playwright.chromium.connect_over_cdp.return_value = browser
+        process = MagicMock()
+        process.poll.return_value = 0
+
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch("wb_inn_extractor.wb_research._find_system_chrome", return_value=Path("C:/Chrome/chrome.exe")),
+            patch("wb_inn_extractor.wb_research._reserve_local_port", return_value=9222),
+            patch("wb_inn_extractor.wb_research._wait_for_chrome_debug_port"),
+            patch("wb_inn_extractor.wb_research.subprocess.Popen", return_value=process) as popen,
+        ):
+            session = _open_system_chrome_session(playwright, Path(temp_dir) / "profile")
+
+        args = popen.call_args.args[0]
+        self.assertIn("--headless=new", args)
+        self.assertIn("--enable-quic", args)
+        self.assertTrue(any(arg.startswith("--user-agent=Mozilla/5.0") for arg in args))
+        self.assertNotIn("--start-maximized", args)
+        self.assertIs(session.context, browser.contexts[0])
 
 
 if __name__ == "__main__":
