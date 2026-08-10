@@ -886,7 +886,6 @@ class App:
         self.conference_autosearch_only_p1_var.trace_add("write", lambda *_: self._save_settings())
         self.sample_use_known_sellers_var.trace_add("write", lambda *_: self._save_settings())
 
-
     def _open_registry_path(self) -> None:
         path = Path(self.registry_path_var.get().strip() or "output/inn_registry.xlsx")
         if not path.exists():
