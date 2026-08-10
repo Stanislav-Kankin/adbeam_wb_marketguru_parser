@@ -133,6 +133,10 @@ class TransientWBError(RuntimeError):
     pass
 
 
+class BrowserStartupError(RuntimeError):
+    pass
+
+
 class _BrowserSession:
     def __init__(
         self,
@@ -256,10 +260,23 @@ class BatchInspector:
         self._page = _fresh_batch_page(self._context)
 
     def _ensure_browser_started(self) -> None:
-        if self._playwright is not None:
+        if self._playwright is not None and self._context is not None:
             return
-        self._playwright = sync_playwright().start()
-        self._restart_context()
+        try:
+            if self._playwright is None:
+                self._playwright = sync_playwright().start()
+            self._restart_context()
+        except Exception as exc:
+            self._close_context()
+            if self._playwright is not None:
+                try:
+                    self._playwright.stop()
+                except Exception:
+                    pass
+                self._playwright = None
+            if isinstance(exc, BrowserStartupError):
+                raise
+            raise BrowserStartupError(f"Не удалось запустить рабочий браузер WB: {exc}") from exc
 
     def _ensure_page(self) -> Page:
         if self._context is None:
@@ -915,7 +932,7 @@ def _open_browser_session(playwright, headful: bool, profile_dir: Path | None) -
 def _open_system_chrome_session(playwright, profile_dir: Path) -> _BrowserSession:
     chrome_path = _find_system_chrome()
     if chrome_path is None:
-        raise RuntimeError("Не найден установленный Google Chrome. Он нужен для прохождения защиты WB.")
+        raise BrowserStartupError("Не найден установленный Google Chrome. Он нужен для прохождения защиты WB.")
 
     profile_dir.mkdir(parents=True, exist_ok=True)
     debug_port = _reserve_local_port()
@@ -939,7 +956,7 @@ def _open_system_chrome_session(playwright, profile_dir: Path) -> _BrowserSessio
         _wait_for_chrome_debug_port(debug_port=debug_port, process=process)
         browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
         if not browser.contexts:
-            raise RuntimeError("Chrome запущен, но профиль браузера недоступен")
+            raise BrowserStartupError("Chrome запущен, но профиль браузера недоступен")
         return _BrowserSession(context=browser.contexts[0], browser=browser, process=process)
     except Exception:
         if process.poll() is None:
@@ -972,7 +989,7 @@ def _wait_for_chrome_debug_port(
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"Google Chrome завершился при запуске, код {process.returncode}")
+            raise BrowserStartupError(f"Google Chrome завершился при запуске, код {process.returncode}")
         try:
             with urlopen(endpoint, timeout=1) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -981,7 +998,7 @@ def _wait_for_chrome_debug_port(
         except Exception as exc:
             last_error = exc
             time.sleep(0.25)
-    raise RuntimeError(f"Не удалось подключиться к Google Chrome: {last_error}")
+    raise BrowserStartupError(f"Не удалось подключиться к Google Chrome: {last_error}")
 
 
 def _terminate_process_tree(pid: int) -> None:

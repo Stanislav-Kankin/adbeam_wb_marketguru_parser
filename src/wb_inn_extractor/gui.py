@@ -45,7 +45,7 @@ from .excel_io import (
     update_seller_history_from_batch_files,
 )
 from .models import AnalyzeSummary
-from .wb_research import BatchInspector, build_row_error_result, inspect_product_row
+from .wb_research import BrowserStartupError, BatchInspector, build_row_error_result, inspect_product_row
 
 
 SETTINGS_PATH = Path(".wb_inn_gui_settings.json")
@@ -1878,6 +1878,14 @@ class App:
                         row_number=row_number,
                         research_row=research_row,
                     )
+                except BrowserStartupError as exc:
+                    if output_rows:
+                        save_batch_results(batch_output, output_rows)
+                    raise RuntimeError(
+                        f"Batch остановлен на строке {row_number}: браузер WB не запустился. "
+                        "Закрой Chrome с профилем парсера и повтори запуск. "
+                        f"Причина: {exc}"
+                    ) from exc
                 except Exception as exc:
                     result = build_row_error_result(
                         row_number=row_number,
@@ -1886,7 +1894,7 @@ class App:
                         profile_dir=profile_dir,
                     )
                     self._append_log(
-                        f"Batch: СЃС‚СЂРѕРєР° {row_number} СѓРїР°Р»Р° РїРѕСЃР»Рµ РїРѕРІС‚РѕСЂРЅС‹С… РїРѕРїС‹С‚РѕРє, РїРёС€Сѓ ROW_ERROR | note={result.note}\n"
+                        f"Batch: строка {row_number} упала после повторных попыток, пишу ROW_ERROR | note={result.note}\n"
                     )
                 output_rows.append({
                     "row_number": row_number,
